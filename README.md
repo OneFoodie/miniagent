@@ -319,6 +319,17 @@ npm run model:fetch                        # 下载 embedding 模型到 ./models
 #   MINIAGENT_EMBEDDING_REMOTE_HOST=https://hf-mirror.com   # 直连 huggingface.co 会超时
 ```
 
+**连不上 HuggingFace 也连不上镜像时**，可以直接取发布好的权重包——它作为 Release 附件分发，
+不进 git 历史（`.gitignore` 排除了 `models/`）：
+
+```bash
+tar -xf paraphrase-multilingual-MiniLM-L12-v2.tar -C models/
+```
+
+整包约 410 MB，解压后是 `./models/Xenova/paraphrase-multilingual-MiniLM-L12-v2/`，
+与 `npm run model:fetch` 的落点完全一致（精度 q4，对应 `MINIAGENT_EMBEDDING_DTYPE=q4`）。
+包名与 SHA256 见 <https://github.com/OneFoodie/miniagent/releases> 的 `models-v1`。
+
 模型就位后**完全离线加载**，不再走网络。索引落在 `./vector-db`（可删，删了下次检索全量重建）。
 
 **首次检索要等索引同步**：改过的文档会在下一次检索时重新嵌入，本地 CPU 上是分钟级操作
