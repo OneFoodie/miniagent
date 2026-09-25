@@ -16,6 +16,10 @@
 - **Web 控制台** — 步骤时间线、模型思考内容、实时流式文本、原始轨迹、会话历史（零前端框架）；答案支持**表格 / 图片 / 流程图 / HTML 之外的行内格式**
 - **评测** — 规则裁判 + LLM 裁判，输出量化报告，可用于回归
 
+**在线演示**：[http://wangjunqing.cn:8881/](http://wangjunqing.cn:8881/) —— 跑在阿里云 Alibaba Cloud Linux 3（2 核 2G）上，
+systemd 常驻、以非 root 用户运行，知识库用零依赖的词面后端（`lexical`）。
+该实例**未加鉴权**，只作演示；不要把带真实数据或 API Key 的实例这样直接暴露在公网。
+
 设计文档见 [docs/superpowers/specs/2026-09-23-miniagent-design.md](docs/superpowers/specs/2026-09-23-miniagent-design.md)；
 与市场主流框架的差距比对与取舍见 [能力差距收敛与市场适配评估](docs/designs/2026-09-25-能力差距收敛与市场适配评估.md)。
 
