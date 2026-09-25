@@ -328,7 +328,8 @@ tar -xf paraphrase-multilingual-MiniLM-L12-v2.tar -C models/
 
 整包约 410 MB，解压后是 `./models/Xenova/paraphrase-multilingual-MiniLM-L12-v2/`，
 与 `npm run model:fetch` 的落点完全一致（精度 q4，对应 `MINIAGENT_EMBEDDING_DTYPE=q4`）。
-包名与 SHA256 见 <https://github.com/OneFoodie/miniagent/releases> 的 `models-v1`。
+下载：[Releases · v0.1](https://github.com/OneFoodie/miniagent/releases/tag/v0.1)，
+SHA256 `9f699af82e3bd51f8617ecc546c8ea7ce31afa95f7f9661f6b6b7f4954e32272`。
 
 模型就位后**完全离线加载**，不再走网络。索引落在 `./vector-db`（可删，删了下次检索全量重建）。
 
