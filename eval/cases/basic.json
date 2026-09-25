@@ -1,0 +1,47 @@
+{
+  "name": "basic",
+  "defaultMaxIterations": 6,
+  "cases": [
+    {
+      "id": "calc-arithmetic",
+      "question": "计算 (128+256)*2 等于多少？只回答数字。",
+      "expect": { "mustInclude": ["768"], "tools": ["calculator"] },
+      "maxIterations": 3
+    },
+    {
+      "id": "calc-large-multiplication",
+      "question": "1234 * 5678 等于多少？只回答数字。",
+      "expect": { "mustInclude": ["7006652"], "tools": ["calculator"] },
+      "maxIterations": 3
+    },
+    {
+      "id": "calc-factorial-chain",
+      "question": "先算 15 的阶乘，再把结果除以 15，等于多少？只回答数字。",
+      "expect": { "mustInclude": ["87178291200"], "tools": ["calculator"] },
+      "maxIterations": 4
+    },
+    {
+      "id": "knowledge-api-endpoints",
+      "question": "按项目设计文档，阶段四（部署与监控）规划了哪几个 API 端点？只列端点。",
+      "expect": {
+        "mustInclude": ["/health", "/metrics"],
+        "tools": ["search_knowledge"]
+      },
+      "maxIterations": 4,
+      "judgeNote": "答案应覆盖 /v1/agent/run、/v1/agent/stream、/health、/metrics 四个端点"
+    },
+    {
+      "id": "knowledge-chunking",
+      "question": "项目设计文档里，知识库的文档切分策略是什么？只回答策略本身。",
+      "expect": { "mustInclude": ["标题"], "tools": ["search_knowledge"] },
+      "maxIterations": 4
+    },
+    {
+      "id": "explain-result",
+      "question": "计算 17 乘以 23，然后用一句话解释这个结果在实际场景里可能代表什么。",
+      "expect": { "mustInclude": ["391"], "tools": ["calculator"] },
+      "maxIterations": 4,
+      "judgeNote": "除了算对 391，还应当有一句自然语言解释，而不是只丢一个数字"
+    }
+  ]
+}

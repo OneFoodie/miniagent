@@ -1,0 +1,56 @@
+{
+  "name": "miniagent",
+  "version": "0.1.0",
+  "description": "从零手写的教学级异步 Agent 框架（TypeScript 版）",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "miniagent": "src/cli.ts"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --import tsx src/server/server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start:dist": "node --env-file-if-exists=.env dist/server/server.js",
+    "cli": "node --env-file-if-exists=.env --import tsx src/cli.ts",
+    "knowledge:add": "node --env-file-if-exists=.env --import tsx scripts/knowledgeAdd.ts",
+    "knowledge:reindex": "node --env-file-if-exists=.env --import tsx scripts/knowledgeReindex.ts",
+    "model:fetch": "node --env-file-if-exists=.env --import tsx scripts/fetchModel.ts",
+    "eval": "node --env-file-if-exists=.env --import tsx scripts/runEval.ts",
+    "trace:replay": "node --env-file-if-exists=.env --import tsx scripts/traceReplay.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^3.23",
+    "zod-to-json-schema": "^3.23"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^4.3.0",
+    "@lancedb/lancedb": "^0.39.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/node": "^22.20.4",
+    "eslint": "^9.39.4",
+    "globals": "^17.12.0",
+    "tsx": "^4.16",
+    "typescript": "^5.5",
+    "typescript-eslint": "^8.70.1",
+    "vitest": "^2.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true,
+    "onnxruntime-node@1.30.0": true,
+    "onnxruntime-node@1.19.2": true,
+    "sharp@0.33.5": true,
+    "protobufjs@7.6.6": true
+  }
+}

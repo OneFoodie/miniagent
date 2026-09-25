@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 是依赖声明的下限（@lancedb/lancedb 要求 >=22），24 是当前开发运行时
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 代码风格检查
+        run: npm run lint
+
+      - name: 单元测试
+        run: npm test
+        env:
+          # 测试全程用 FakeLLM，不需要真实 Key；这里给个占位符避免加载配置时报错
+          MINIAGENT_DEEPSEEK_API_KEY: test-key
+          # 让 vitest 不写新快照：快照漂移应当显式 `npx vitest run -u` 后提交
+          CI: "true"

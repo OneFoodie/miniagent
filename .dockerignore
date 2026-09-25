@@ -1,0 +1,32 @@
+# 构建上下文里不需要的东西。
+# 尤其是 models/（380MB 模型）与 node_modules/：打进上下文既慢，
+# 又会让 `COPY . .` 意外带上宿主平台的产物。
+
+node_modules
+dist
+
+# 运行产物
+workspace
+traces
+history
+memory
+eval_reports
+vector-db
+.cache
+
+# 模型与数据（用卷挂载，不打进镜像）
+models
+knowledge
+docs
+
+# 凭据
+.env
+
+# 其他
+.git
+.github
+coverage
+tests
+*.log
+.pytest_cache
+.ruff_cache

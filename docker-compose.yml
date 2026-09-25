@@ -1,0 +1,54 @@
+# 一键起服务：docker compose up --build
+#
+# 前置：仓库根目录有 .env（含 MINIAGENT_DEEPSEEK_API_KEY）。
+#   compose 会用它做变量替换，同时通过 env_file 整份注入容器——
+#   配置项增减都不用改这个文件。
+#
+# 挂载说明：知识库/模型/运行产物都走卷，不打进镜像，
+#   所以文档改了不用重建镜像；反过来，不挂载直接 docker run 会得到空知识库。
+
+services:
+  miniagent:
+    build: .
+    image: miniagent:local
+    container_name: miniagent
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # 容器内路径与宿主不同，这几项必须覆盖 .env 里的相对路径
+      MINIAGENT_KNOWLEDGE_DIR: /app/docs,/app/knowledge
+      MINIAGENT_SKILLS_DIR: /app/skills
+      MINIAGENT_HISTORY_DIR: /app/history
+      MINIAGENT_TRACE_DIR: /app/traces
+      MINIAGENT_WORKSPACE: /app/workspace
+      MINIAGENT_CHECKPOINT_DIR: /app/checkpoints
+      MINIAGENT_MCP_CONFIG: /app/mcp.json
+      # 镜像基于 Debian slim，里面没有 PowerShell：默认关掉，免得模型拿到一个必然失败的工具
+      #   要在容器里用 shell 就先在 Dockerfile 里装 pwsh，再把这里改成 readonly / full
+      MINIAGENT_POWERSHELL_MODE: "off"
+      MINIAGENT_MEMORY_FILE: /app/memory/long_term.jsonl
+      MINIAGENT_LIFECYCLE_MEMORY_FILE: /app/memory/lifecycle.jsonl
+      MINIAGENT_EMBEDDING_LOCAL_MODEL_PATH: /app/models
+      MINIAGENT_EMBEDDING_CACHE_DIR: /app/.cache/embeddings
+      MINIAGENT_VECTOR_DB_PATH: /app/vector-db
+    volumes:
+      # 只读：知识源与模型不该被容器改
+      - ./docs:/app/docs:ro
+      - ./knowledge:/app/knowledge:ro
+      - ./models:/app/models:ro
+      # 可写：索引与运行产物要留在宿主上，容器重建不丢
+      - ./vector-db:/app/vector-db
+      - ./traces:/app/traces
+      - ./history:/app/history
+      - ./memory:/app/memory
+      - ./workspace:/app/workspace
+      # 运行存档（断点续跑 + 审批）也要留在宿主上，容器重启后还能接着跑
+      - ./checkpoints:/app/checkpoints
+      # MCP 配置：默认不挂。要用 MCP 时先 `cp mcp.example.json mcp.json` 再打开下面这行
+      #   （宿主没有该文件时 Docker 会建出空目录，反而让人以为配好了）
+      # - ./mcp.json:/app/mcp.json:ro
+      # 语义后端要在没有本地模型时下载权重，缓存目录也得可写
+      - ./.cache:/app/.cache

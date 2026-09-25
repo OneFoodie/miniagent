@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MiniAgent · 研究控制台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <path d="M4 20V6a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"
+              stroke="currentColor" stroke-width="1.4" />
+            <path d="M14 4v6h6" stroke="currentColor" stroke-width="1.4" />
+            <path d="M8 14h8M8 17h5" stroke="currentColor" stroke-width="1.4"
+              stroke-linecap="round" />
+          </svg>
+        </span>
+        <div class="brand-text">
+          <h1>MiniAgent</h1>
+          <p>研究控制台 / Research Console</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <div class="model-badge">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="modelName">deepseek-flash</span>
+        </div>
+        <div class="history-wrap">
+          <button id="historyBtn" class="top-btn" aria-expanded="false">历史</button>
+          <div id="historyPanel" class="history-panel" hidden></div>
+        </div>
+        <button id="newChatBtn" class="top-btn">新对话</button>
+      </div>
+    </header>
+
+    <main class="stage">
+      <div class="thread" id="thread">
+        <!-- 欢迎空状态 -->
+        <section class="welcome" id="welcome">
+          <p class="welcome-eyebrow">AGENT FRAMEWORK · STAGE 02</p>
+          <h2 class="welcome-title">你想研究<br />点什么？</h2>
+          <p class="welcome-sub">
+            我可以自主调用搜索、抓取、计算与文件工具，把过程一步步展示给你。
+          </p>
+          <div class="suggestions">
+            <button class="chip" data-prompt="计算 (128+256)*2，再用一句话解释结果">
+              <span class="chip-index">01</span>
+              计算并解释一个表达式
+            </button>
+            <button class="chip" data-prompt="帮我搜索 2026 年人工智能领域的重要进展，并总结成 3 条要点">
+              <span class="chip-index">02</span>
+              联网调研一个话题
+            </button>
+            <button class="chip" data-prompt="在沙箱里写一个名为 notes.txt 的文件，内容是一句问候，然后读出来确认">
+              <span class="chip-index">03</span>
+              写入并校验文件
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <div class="dock-wrap">
+        <div class="dock">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="输入研究任务，Enter 发送，Shift + Enter 换行"
+          ></textarea>
+          <button id="sendBtn" class="send-btn" aria-label="发送">
+            <!-- 发送图标 -->
+            <svg class="icon-send" viewBox="0 0 24 24" width="20" height="20" fill="none">
+              <path d="M4 12h15M13 6l6 6-6 6" stroke="currentColor"
+                stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <!-- 停止图标：busy 时显示 -->
+            <svg class="icon-stop" viewBox="0 0 24 24" width="18" height="18" fill="none" hidden>
+              <rect x="6" y="6" width="12" height="12" rx="2"
+                fill="currentColor" stroke="none" />
+            </svg>
+          </button>
+        </div>
+        <p class="dock-hint">工具在沙箱内执行 · 过程事件实时可见</p>
+      </div>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
