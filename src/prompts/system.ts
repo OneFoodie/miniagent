@@ -66,8 +66,11 @@ const toolPolicy: PromptSegment = {
       );
     }
     if (context.toolNames.includes("powershell")) {
+      // 语法示例必须按平台给：在 Linux 上说要「用 Get-Date」会把模型带错
+      const windows = process.platform === "win32";
+      const timeExample = windows ? "Get-Date" : "date";
       lines.push(
-        "- 需要当前日期时间、本机环境信息或要跑命令行工具（git 等）时用 powershell（如 Get-Date）。",
+        `- 需要当前日期时间、本机环境信息或要跑命令行工具（git 等）时用 powershell（如 ${timeExample}）。`,
         "- 你的知识不含实时时间；问到「现在」必须实际调用工具，不要凭记忆或推测作答。",
       );
       // 有了脚本这条通道，「循环 / 批量计算 / 反复试错」就不必硬凑工具调用来表达
@@ -75,7 +78,13 @@ const toolPolicy: PromptSegment = {
         lines.push(
           "- 需要循环、批量计算或反复试错时，别硬凑工具调用：用 write_file 把脚本写到 scripts/，",
           "  再用 powershell 执行（node scripts/x.js / python scripts/x.py），按 stdout 判断结果。",
-          "- Windows 上写 python（或 py），不要写 python3——它常是应用商店的占位符，跑起来没有任何输出。",
+        );
+        lines.push(
+          windows
+            ? "- Windows 上写 python（或 py），不要写 python3——它常是应用商店的占位符，跑起来没有任何输出。"
+            : "- 这个平台上解释器叫 python3，不要写 python。",
+        );
+        lines.push(
           "- 脚本的当前目录就是工作区根；输出过长会自动存成文件并把路径给你，用 read_file 分段读。",
         );
       }

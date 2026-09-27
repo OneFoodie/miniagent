@@ -93,18 +93,20 @@ describe("PromptBuilder", () => {
 
   it("注册了 powershell 才提示「时间要靠工具取」，否则不提", () => {
     // 模型的训练数据里没有"现在"，不给工具就不该鼓励它去猜时间
+    // 语法示例按平台给：Linux 上说的是 date，Windows 上才是 Get-Date
+    const timeExample = process.platform === "win32" ? "Get-Date" : "date";
     const withTool = createDefaultPromptBuilder().build({
       ...baseContext,
       toolNames: ["powershell"],
     }).text;
-    expect(withTool).toContain("Get-Date");
+    expect(withTool).toContain(timeExample);
     expect(withTool).toContain("不要凭记忆或推测作答");
 
     const withoutTool = createDefaultPromptBuilder().build({
       ...baseContext,
       toolNames: ["calculator"],
     }).text;
-    expect(withoutTool).not.toContain("Get-Date");
+    expect(withoutTool).not.toContain("需要当前日期时间");
   });
 
   it("注册了 create_skill 才提示「把跑通的做法固化成技能」，否则不提", () => {
@@ -122,20 +124,28 @@ describe("PromptBuilder", () => {
     expect(withoutTool).not.toContain("固化成技能");
   });
 
-  it("能写文件时才教「写脚本再执行」这条工作法，并点明 python3 的坑", () => {
+  it("能写文件时才教「写脚本再执行」这条工作法，并点明本平台 python 的坑", () => {
     // 只给 shell 不给 write_file 时，模型没有落脚本的地方，提这条只会引导它去乱写
     const full = createDefaultPromptBuilder().build({
       ...baseContext,
       toolNames: ["powershell", "write_file", "read_file"],
     }).text;
     expect(full).toContain("scripts/");
-    expect(full).toContain("不要写 python3");
+
+    // python 的坑是分平台的：Windows 上 python3 常是应用商店占位符，Linux 上 python 往往不存在
+    if (process.platform === "win32") {
+      expect(full).toContain("不要写 python3");
+      expect(full).not.toContain("解释器叫 python3");
+    } else {
+      expect(full).toContain("解释器叫 python3");
+      expect(full).not.toContain("不要写 python3");
+    }
 
     const shellOnly = createDefaultPromptBuilder().build({
       ...baseContext,
       toolNames: ["powershell"],
     }).text;
-    expect(shellOnly).not.toContain("不要写 python3");
+    expect(shellOnly).not.toContain("scripts/");
   });
 
   it("证据规则两个方向都写上：既不否定历史执行，也不放任声称未发生的调用", () => {
