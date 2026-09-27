@@ -44,4 +44,16 @@ describe("ToolRegistry", () => {
     const registry = new ToolRegistry();
     expect(() => registry.get("not_exists")).toThrow("未注册");
   });
+
+  it("注销后不再存在，重复注销不报错", () => {
+    const registry = new ToolRegistry();
+    registry.register(greet);
+
+    expect(registry.unregister("greet")).toBe(true);
+    expect(registry.has("greet")).toBe(false);
+    expect(registry.toolPayload()).toEqual([]);
+
+    // 注销不存在的名字是 no-op：off 档下改 workspace 会走到这条路径
+    expect(registry.unregister("greet")).toBe(false);
+  });
 });

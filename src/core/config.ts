@@ -186,6 +186,17 @@ export interface Settings {
   memosUserId: string;
   /** MemOS 单次请求超时（秒） */
   memosTimeout: number;
+
+  /**
+   * 配置菜单的管理令牌。留空则 /api/config 一律 403（即关闭配置接口）。
+   * 单独一个令牌而不是复用 API Key：它能改 powershellMode，等于本机执行权。
+   */
+  adminToken: string;
+  /**
+   * 配置菜单写回的目标文件。默认 ./.env，与 `node --env-file-if-exists=.env` 对齐。
+   * 独立成配置项是为了测试时能指向临时目录，不碰开发者的真实 .env。
+   */
+  envFile: string;
 }
 
 function readString(name: string, defaultValue: string): string {
@@ -383,6 +394,9 @@ export function loadSettings(): Settings {
     ),
     memosUserId: readString("MINIAGENT_MEMOS_USER_ID", "miniagent-local"),
     memosTimeout: readNumber("MINIAGENT_MEMOS_TIMEOUT", 15),
+
+    adminToken: readString("MINIAGENT_ADMIN_TOKEN", ""),
+    envFile: readString("MINIAGENT_ENV_FILE", "./.env"),
   };
 
   // 接入点与模型名缺失都是「一跑到第一次请求才炸」的配置错误，启动时就说清楚

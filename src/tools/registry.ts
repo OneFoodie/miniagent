@@ -13,6 +13,11 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  /** 注销工具；返回是否真的删除了（不存在时为 no-op，便于「先删后建」不判断档位） */
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
   get(name: string): BaseTool {
     const tool = this.tools.get(name);
     if (!tool) throw new ToolError(`模型调用了未注册的工具: ${name}`);
