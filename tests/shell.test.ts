@@ -16,8 +16,8 @@ import { describe, expect, it } from "vitest";
 import { loadSettings, type Settings } from "../src/core/config.js";
 import { buildChildEnv } from "../src/tools/builtins/shell/exec.js";
 import {
-  POWERSHELL_TOOL_NAME,
-  registerPowershell,
+  SHELL_TOOL_NAME,
+  registerShell,
 } from "../src/tools/builtins/shell/index.js";
 import {
   checkReadonlyCommand as checkPosixCommand,
@@ -60,8 +60,8 @@ async function testSettings(overrides: Partial<Settings> = {}): Promise<Settings
 
 async function makeTool(overrides: Partial<Settings> = {}) {
   const registry = new ToolRegistry();
-  await registerPowershell(registry, await testSettings(overrides));
-  return registry.get(POWERSHELL_TOOL_NAME);
+  await registerShell(registry, await testSettings(overrides));
+  return registry.get(SHELL_TOOL_NAME);
 }
 
 /* ---------------- 平台无关：词法器 ---------------- */
@@ -142,27 +142,27 @@ describe("子进程环境过滤", () => {
 describe("档位与注册", () => {
   it("off 档不注册工具", async () => {
     const registry = new ToolRegistry();
-    await registerPowershell(registry, await testSettings({ powershellMode: "off" }));
-    expect(registry.has(POWERSHELL_TOOL_NAME)).toBe(false);
+    await registerShell(registry, await testSettings({ shellMode: "off" }));
+    expect(registry.has(SHELL_TOOL_NAME)).toBe(false);
   });
 
   it("默认档位是 readonly（保守档），且工具超时留了余量", async () => {
     process.env.MINIAGENT_DEEPSEEK_API_KEY = "test-key";
-    expect(loadSettings().powershellMode).toBe("readonly");
+    expect(loadSettings().shellMode).toBe("readonly");
 
-    const tool = await makeTool({ powershellTimeout: 7 });
+    const tool = await makeTool({ shellTimeout: 7 });
     expect(tool.timeoutSeconds).toBeGreaterThan(7);
   });
 
   it("档位写错时启动即报错，避免以为关了其实开着", () => {
-    const original = process.env.MINIAGENT_POWERSHELL_MODE;
-    process.env.MINIAGENT_POWERSHELL_MODE = "read-only";
+    const original = process.env.MINIAGENT_SHELL_MODE;
+    process.env.MINIAGENT_SHELL_MODE = "read-only";
     try {
-      expect(() => loadSettings()).toThrow(/MINIAGENT_POWERSHELL_MODE/);
+      expect(() => loadSettings()).toThrow(/MINIAGENT_SHELL_MODE/);
     } finally {
       // 注意：给 process.env 赋 undefined 会变成字符串 "undefined"，必须显式删除
-      if (original === undefined) delete process.env.MINIAGENT_POWERSHELL_MODE;
-      else process.env.MINIAGENT_POWERSHELL_MODE = original;
+      if (original === undefined) delete process.env.MINIAGENT_SHELL_MODE;
+      else process.env.MINIAGENT_SHELL_MODE = original;
     }
   });
 
@@ -174,8 +174,8 @@ describe("档位与注册", () => {
   });
 
   it("单次超时上限按档位给：full 档为脚本留出空间，readonly 档不给", async () => {
-    const readonlyTool = await makeTool({ powershellMode: "readonly", powershellTimeout: 7 });
-    const fullTool = await makeTool({ powershellMode: "full", powershellTimeout: 7 });
+    const readonlyTool = await makeTool({ shellMode: "readonly", shellTimeout: 7 });
+    const fullTool = await makeTool({ shellMode: "full", shellTimeout: 7 });
 
     // readonly：只比配置值多一点余量，长任务不该走这条路
     expect(readonlyTool.timeoutSeconds).toBeGreaterThan(7);
@@ -184,16 +184,48 @@ describe("档位与注册", () => {
     expect(fullTool.timeoutSeconds).toBeGreaterThanOrEqual(300);
 
     // 配置值本身比上限还大时不能被压回去
-    const bigTool = await makeTool({ powershellMode: "full", powershellTimeout: 600 });
+    const bigTool = await makeTool({ shellMode: "full", shellTimeout: 600 });
     expect(bigTool.timeoutSeconds).toBeGreaterThan(600);
   });
 
   it("readonly 档拦截危险命令时不会真的启动进程", async () => {
-    const tool = await makeTool({ powershellMode: "readonly" });
+    const tool = await makeTool({ shellMode: "readonly" });
 
     const result = await tool.run({ command: "Remove-Item -Path C:\\important -Recurse" });
     expect(result.ok).toBe(false);
     expect(result.error).toContain("只读档拒绝执行");
+  });
+});
+
+/* ---------------- 改名兼容 ---------------- */
+
+describe("工具改名后的兼容", () => {
+  it("只设旧环境变量时仍然生效（新名优先）", () => {
+    process.env.MINIAGENT_DEEPSEEK_API_KEY = "test-key";
+    const originalShell = process.env.MINIAGENT_SHELL_MODE;
+    const originalOld = process.env.MINIAGENT_POWERSHELL_MODE;
+    delete process.env.MINIAGENT_SHELL_MODE;
+    process.env.MINIAGENT_POWERSHELL_MODE = "full";
+    try {
+      expect(loadSettings().shellMode).toBe("full");
+    } finally {
+      if (originalOld === undefined) delete process.env.MINIAGENT_POWERSHELL_MODE;
+      else process.env.MINIAGENT_POWERSHELL_MODE = originalOld;
+      if (originalShell !== undefined) process.env.MINIAGENT_SHELL_MODE = originalShell;
+    }
+  });
+
+  it("审批名单里的旧工具名被映射为 shell", () => {
+    // 审批按工具名匹配，不映射的话用户为开 full 档配的审批会静默失效
+    process.env.MINIAGENT_DEEPSEEK_API_KEY = "test-key";
+    const original = process.env.MINIAGENT_APPROVAL_TOOLS;
+    process.env.MINIAGENT_APPROVAL_TOOLS = "powershell,write_file";
+    try {
+      expect(loadSettings().approvalTools).toEqual(["shell", "write_file"]);
+    } finally {
+      if (original === undefined) delete process.env.MINIAGENT_APPROVAL_TOOLS;
+      else process.env.MINIAGENT_APPROVAL_TOOLS = original;
+    }
   });
 });
 
@@ -257,7 +289,7 @@ describe.skipIf(process.platform !== "win32")("PowerShell readonly 档：白名�
 
 describe.skipIf(process.platform !== "win32" || !pwshAvailable)("PowerShell 真实执行", () => {
   it("readonly 档能取到当前时间（这就是加这个工具的直接动机）", async () => {
-    const tool = await makeTool({ powershellMode: "readonly" });
+    const tool = await makeTool({ shellMode: "readonly" });
 
     const result = await tool.run({ command: "Get-Date" });
 
@@ -268,7 +300,7 @@ describe.skipIf(process.platform !== "win32" || !pwshAvailable)("PowerShell 真�
   });
 
   it("full 档不限制命令，stdout 原样回传", async () => {
-    const tool = await makeTool({ powershellMode: "full" });
+    const tool = await makeTool({ shellMode: "full" });
 
     const result = await tool.run({ command: "Write-Output hello-ps" });
 
@@ -277,7 +309,7 @@ describe.skipIf(process.platform !== "win32" || !pwshAvailable)("PowerShell 真�
   });
 
   it("非零退出码转成失败，并把错误输出交给模型", async () => {
-    const tool = await makeTool({ powershellMode: "full" });
+    const tool = await makeTool({ shellMode: "full" });
 
     const result = await tool.run({ command: "exit 3" });
 
@@ -286,7 +318,7 @@ describe.skipIf(process.platform !== "win32" || !pwshAvailable)("PowerShell 真�
   });
 
   it("命令超时会被真正终止，并给出可操作的建议", async () => {
-    const tool = await makeTool({ powershellMode: "full", powershellTimeout: 1 });
+    const tool = await makeTool({ shellMode: "full", shellTimeout: 1 });
 
     const result = await tool.run({ command: "Start-Sleep -Seconds 30" });
 
@@ -296,7 +328,7 @@ describe.skipIf(process.platform !== "win32" || !pwshAvailable)("PowerShell 真�
 
   it("timeout_seconds 能覆盖默认值：慢脚本不必改全局配置就能跑完", async () => {
     // 默认超时给得很大，只有「显式传入的 1s」生效时才会失败——这正是要验证的点
-    const tool = await makeTool({ powershellMode: "full", powershellTimeout: 60 });
+    const tool = await makeTool({ shellMode: "full", shellTimeout: 60 });
 
     const result = await tool.run({
       command: "Start-Sleep -Seconds 5",
@@ -367,7 +399,7 @@ describe("POSIX readonly 白名单", () => {
 
 describe.skipIf(process.platform === "win32")("POSIX 真实执行", () => {
   it("readonly 档能取到时间与用户名（不走 shell）", async () => {
-    const tool = await makeTool({ powershellMode: "readonly" });
+    const tool = await makeTool({ shellMode: "readonly" });
 
     const date = await tool.run({ command: "date" });
     expect(date.ok).toBe(true);
@@ -378,7 +410,7 @@ describe.skipIf(process.platform === "win32")("POSIX 真实执行", () => {
   });
 
   it("readonly 档不展开通配符：*.txt 会字面传给命令", async () => {
-    const tool = await makeTool({ powershellMode: "readonly" });
+    const tool = await makeTool({ shellMode: "readonly" });
 
     // 工作目录里没有字面名为 *.txt 的文件，所以失败；关键是原因来自「找不到这个名字」
     const result = await tool.run({ command: "ls *.txt" });
@@ -386,7 +418,7 @@ describe.skipIf(process.platform === "win32")("POSIX 真实执行", () => {
   });
 
   it("full 档真的经过 shell：管道可用", async () => {
-    const tool = await makeTool({ powershellMode: "full" });
+    const tool = await makeTool({ shellMode: "full" });
 
     const result = await tool.run({ command: "echo hello | tr a-z A-Z" });
     expect(result.ok).toBe(true);
@@ -394,7 +426,7 @@ describe.skipIf(process.platform === "win32")("POSIX 真实执行", () => {
   });
 
   it("非零退出码转成失败", async () => {
-    const tool = await makeTool({ powershellMode: "full" });
+    const tool = await makeTool({ shellMode: "full" });
 
     const result = await tool.run({ command: "exit 3" });
     expect(result.ok).toBe(false);
@@ -402,7 +434,7 @@ describe.skipIf(process.platform === "win32")("POSIX 真实执行", () => {
   });
 
   it("命令超时会被真正终止", async () => {
-    const tool = await makeTool({ powershellMode: "full", powershellTimeout: 1 });
+    const tool = await makeTool({ shellMode: "full", shellTimeout: 1 });
 
     const result = await tool.run({ command: "sleep 30" });
     expect(result.ok).toBe(false);

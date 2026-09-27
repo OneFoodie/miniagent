@@ -97,7 +97,7 @@ describe("PromptBuilder", () => {
     const timeExample = process.platform === "win32" ? "Get-Date" : "date";
     const withTool = createDefaultPromptBuilder().build({
       ...baseContext,
-      toolNames: ["powershell"],
+      toolNames: ["shell"],
     }).text;
     expect(withTool).toContain(timeExample);
     expect(withTool).toContain("不要凭记忆或推测作答");
@@ -128,7 +128,7 @@ describe("PromptBuilder", () => {
     // 只给 shell 不给 write_file 时，模型没有落脚本的地方，提这条只会引导它去乱写
     const full = createDefaultPromptBuilder().build({
       ...baseContext,
-      toolNames: ["powershell", "write_file", "read_file"],
+      toolNames: ["shell", "write_file", "read_file"],
     }).text;
     expect(full).toContain("scripts/");
 
@@ -143,7 +143,7 @@ describe("PromptBuilder", () => {
 
     const shellOnly = createDefaultPromptBuilder().build({
       ...baseContext,
-      toolNames: ["powershell"],
+      toolNames: ["shell"],
     }).text;
     expect(shellOnly).not.toContain("scripts/");
   });

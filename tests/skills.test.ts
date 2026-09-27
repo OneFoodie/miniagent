@@ -166,8 +166,8 @@ describe("create_skill 元工具", () => {
     name: "daily_report",
     description: "每日盘面简报",
     when_to_use: "用户要当天行情总结时",
-    body: "1. 用 powershell 取当天时间\n2. 用 web_search 查行情\n3. 按结论先行输出",
-    tools: ["powershell", "web_search"],
+    body: "1. 用 shell 取当天时间\n2. 用 web_search 查行情\n3. 按结论先行输出",
+    tools: ["shell", "web_search"],
   };
 
   it("写完立即生效：当轮 load_skill 能读回，落的盘能被自己的解析器读回", async () => {
@@ -182,11 +182,11 @@ describe("create_skill 元工具", () => {
     // 同一轮内 load_skill 就能读到正文（无需等下一轮、更无需重启）
     const loaded = await registry.get("load_skill").run({ name: "daily_report" });
     expect(loaded.ok).toBe(true);
-    expect((loaded.data as { guidance: string }).guidance).toContain("用 powershell 取当天时间");
+    expect((loaded.data as { guidance: string }).guidance).toContain("用 shell 取当天时间");
 
     // 声明的工具、目录摘要都要能对上：说明 frontmatter 被正确解析
     const manifest = skills.get("daily_report")!;
-    expect(manifest.tools).toEqual(["powershell", "web_search"]);
+    expect(manifest.tools).toEqual(["shell", "web_search"]);
     expect(manifest.dir).toBe(join(root, "daily_report"));
     expect(skills.catalog().map((item) => item.name)).toEqual(["daily_report"]);
   });

@@ -674,7 +674,7 @@ async function loadConfigPanel() {
   configSchema = data.schema ?? [];
   configBaseline = { ...data.values };
   for (const field of configSchema) {
-    if (field.type === "powershellMode") {
+    if (field.type === "shellMode") {
       configBaseline[field.key] = switchState(data.values[field.key]);
     }
   }
@@ -811,7 +811,7 @@ function makeConfigRow(field, values, readonlyModeNote) {
   const name = `config-${field.key}`;
 
   // 沙盒开关：二值开关表达不了 readonly，所以勾选与否只看是否 full
-  if (field.type === "powershellMode") {
+  if (field.type === "shellMode") {
     const container = document.createElement("div");
 
     const row = document.createElement("div");
@@ -895,7 +895,7 @@ function collectConfigChanges() {
     const input = configPanel.querySelector(`#config-${field.key}`);
     if (!input) continue;
 
-    if (field.type === "powershellMode") {
+    if (field.type === "shellMode") {
       const next = input.checked ? "full" : "off";
       if (next !== configBaseline[field.key]) values[field.key] = next;
       continue;

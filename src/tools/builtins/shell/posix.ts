@@ -208,8 +208,8 @@ export const posixAdapter: ShellAdapter = {
   missingExecutableHint(executable: string): string {
     return (
       `找不到可执行文件 ${executable}：请安装 bash、` +
-      `或用 MINIAGENT_POWERSHELL_EXECUTABLE 指定（如 sh）；` +
-      `不需要这个工具时可以设 MINIAGENT_POWERSHELL_MODE=off`
+      `或用 MINIAGENT_SHELL_EXECUTABLE 指定（如 sh）；` +
+      `不需要这个工具时可以设 MINIAGENT_SHELL_MODE=off`
     );
   },
 };

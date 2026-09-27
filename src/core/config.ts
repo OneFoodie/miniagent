@@ -1,12 +1,13 @@
 /** 全局配置：读取 MINIAGENT_ 前缀的环境变量（node --env-file=.env 加载 .env）。 */
 
+import { getLogger } from "./logging.js";
 import { findProvider, knownProviders, type ProviderPreset } from "./providers.js";
 
 /**
- * 通用执行通道（powershell 工具）的权限档位。
+ * 通用执行通道（shell 工具）的权限档位。
  * 定义放在配置层：它是「本机允许多大的执行权限」这件事的表述，工具只按它执行。
  */
-export type PowershellMode = "off" | "readonly" | "full";
+export type ShellMode = "off" | "readonly" | "full";
 
 export interface Settings {
   /**
@@ -79,18 +80,18 @@ export interface Settings {
   workspace: string;
 
   /**
-   * 通用执行通道（powershell 工具）的权限档位：
+   * 通用执行通道（shell 工具）的权限档位：
    *   off      不注册该工具
-   *   readonly 只放行只读 cmdlet，且必须是单条简单命令（默认）
-   *   full     不限制——建议同时把 powershell 加进 MINIAGENT_APPROVAL_TOOLS
+   *   readonly 只放行只读命令，单条、不可写（默认）
+   *   full     不限制——建议同时把 shell 加进 MINIAGENT_APPROVAL_TOOLS
    *
    * 这个工具**没有沙箱**（子进程权限 = 本进程权限），档位是唯一的约束手段。
    */
-  powershellMode: PowershellMode;
+  shellMode: ShellMode;
   /** 单条命令的超时（秒） */
-  powershellTimeout: number;
-  /** 可执行文件；留空则 Windows 用 powershell、其它平台用 pwsh */
-  powershellExecutable: string;
+  shellTimeout: number;
+  /** 可执行文件；留空则 Windows 用 powershell、其它平台用 bash */
+  shellExecutable: string;
 
   /** trace 输出目录 */
   traceDir: string;
@@ -189,7 +190,7 @@ export interface Settings {
 
   /**
    * 配置菜单的管理令牌。留空则 /api/config 一律 403（即关闭配置接口）。
-   * 单独一个令牌而不是复用 API Key：它能改 powershellMode，等于本机执行权。
+   * 单独一个令牌而不是复用 API Key：它能改 shellMode，等于本机执行权。
    */
   adminToken: string;
   /**
@@ -277,12 +278,35 @@ function resolvePreset(name: string): ProviderPreset {
 }
 
 /** 权限档位只认三个值：写错就报错，避免「以为关了其实开着」 */
-function readPowershellMode(): PowershellMode {
-  const value = readString("MINIAGENT_POWERSHELL_MODE", "readonly").toLowerCase();
+function readShellMode(): ShellMode {
+  // 新名优先、旧名兜底：已有的 .env 还写着 MINIAGENT_POWERSHELL_MODE，
+  // 静默失效会让档位悄悄回到默认 readonly
+  const value = readString(
+    "MINIAGENT_SHELL_MODE",
+    readString("MINIAGENT_POWERSHELL_MODE", "readonly"),
+  ).toLowerCase();
   if (value === "off" || value === "readonly" || value === "full") return value;
   throw new Error(
-    `环境变量 MINIAGENT_POWERSHELL_MODE 只能是 off / readonly / full，收到: ${value}`,
+    `环境变量 MINIAGENT_SHELL_MODE 只能是 off / readonly / full，收到: ${value}`,
   );
+}
+
+/**
+ * 审批名单：把旧工具名映射成新的。
+ *
+ * 审批是按**工具名**匹配的。工具从 powershell 改名成 shell 之后，
+ * `MINIAGENT_APPROVAL_TOOLS=powershell` 会静默失效——而这条通常正是用户为了开
+ * full 档才配的，恰恰是最需要审批的场景。所以这里做映射，并留一条日志以免无声无息。
+ */
+function readApprovalTools(): string[] {
+  const tools = readList("MINIAGENT_APPROVAL_TOOLS", []);
+  const renamed = tools.map((name) => (name === "powershell" ? "shell" : name));
+  if (renamed.some((name, index) => name !== tools[index])) {
+    getLogger("miniagent.config").warning(
+      "审批名单里的旧工具名 powershell 已视为 shell（该工具已改名）",
+    );
+  }
+  return renamed;
 }
 
 export function loadSettings(): Settings {
@@ -337,9 +361,15 @@ export function loadSettings(): Settings {
     offloadKeepRuns: readNumber("MINIAGENT_OFFLOAD_KEEP_RUNS", 50),
 
     workspace: readString("MINIAGENT_WORKSPACE", "./workspace"),
-    powershellMode: readPowershellMode(),
-    powershellTimeout: readNumber("MINIAGENT_POWERSHELL_TIMEOUT", 30),
-    powershellExecutable: readString("MINIAGENT_POWERSHELL_EXECUTABLE", ""),
+    shellMode: readShellMode(),
+    shellTimeout: readNumber(
+      "MINIAGENT_SHELL_TIMEOUT",
+      readNumber("MINIAGENT_POWERSHELL_TIMEOUT", 30),
+    ),
+    shellExecutable: readString(
+      "MINIAGENT_SHELL_EXECUTABLE",
+      readString("MINIAGENT_POWERSHELL_EXECUTABLE", ""),
+    ),
     traceDir: readString("MINIAGENT_TRACE_DIR", "./traces"),
     otelEnabled: readBoolean("MINIAGENT_OTEL_ENABLED", false),
     // 端点用官方变量名兜底：容器里通常已经按 OTel 规范注入了 OTEL_EXPORTER_OTLP_ENDPOINT
@@ -359,7 +389,7 @@ export function loadSettings(): Settings {
     otelMetricsInterval: readNumber("MINIAGENT_OTEL_METRICS_INTERVAL", 60),
     checkpointDir: readString("MINIAGENT_CHECKPOINT_DIR", "./checkpoints"),
     checkpointEnabled: readBoolean("MINIAGENT_CHECKPOINT_ENABLED", true),
-    approvalTools: readList("MINIAGENT_APPROVAL_TOOLS", []),
+    approvalTools: readApprovalTools(),
     skillsDir: readString("MINIAGENT_SKILLS_DIR", "./skills"),
     mcpConfigPath: readString("MINIAGENT_MCP_CONFIG", "./mcp.json"),
     historyDir: readString("MINIAGENT_HISTORY_DIR", "./history"),

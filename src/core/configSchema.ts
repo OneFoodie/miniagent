@@ -7,7 +7,7 @@
  * 只覆盖常用子集：路径类、记忆/知识库调参这类要先读懂源码才知道后果的项不在内。
  */
 
-import type { PowershellMode, Settings } from "./config.js";
+import type { Settings, ShellMode } from "./config.js";
 import { findProvider, knownProviders } from "./providers.js";
 
 export type ConfigFieldType =
@@ -16,7 +16,7 @@ export type ConfigFieldType =
   | "boolean"
   | "list"
   | "secret"
-  | "powershellMode";
+  | "shellMode";
 
 export type ConfigGroup = "model" | "runtime" | "sandbox" | "files" | "approval";
 
@@ -135,11 +135,11 @@ export const CONFIG_FIELDS: ConfigField[] = [
   },
 
   {
-    key: "powershellMode",
-    env: "MINIAGENT_POWERSHELL_MODE",
+    key: "shellMode",
+    env: "MINIAGENT_SHELL_MODE",
     group: "sandbox",
     label: "通用执行通道",
-    type: "powershellMode",
+    type: "shellMode",
     description: "off 不注册该工具；full 完全不受限。开关口径：开=full，关=off",
   },
 
@@ -158,11 +158,11 @@ export const CONFIG_FIELDS: ConfigField[] = [
     group: "approval",
     label: "需要人工审批的工具",
     type: "list",
-    description: "逗号分隔。建议开 full 档时把 powershell 加进来",
+    description: "逗号分隔。建议开 full 档时把 shell 加进来",
   },
 ];
 
-const MODE_VALUES: PowershellMode[] = ["off", "readonly", "full"];
+const MODE_VALUES: ShellMode[] = ["off", "readonly", "full"];
 
 /** 单值长度上限：挡住明显异常的输入，同时远小于请求体上限 */
 const MAX_VALUE_CHARS = 4000;
@@ -264,13 +264,13 @@ export function normalizeConfigValues(input: Record<string, unknown>): Normalize
         normalized[key] = kept;
         break;
       }
-      case "powershellMode": {
+      case "shellMode": {
         const value = String(raw).toLowerCase();
-        if (!MODE_VALUES.includes(value as PowershellMode)) {
+        if (!MODE_VALUES.includes(value as ShellMode)) {
           errors.push({ key, message: "只能是 off / readonly / full" });
           break;
         }
-        normalized[key] = value as PowershellMode;
+        normalized[key] = value as ShellMode;
         break;
       }
     }

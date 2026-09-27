@@ -621,18 +621,18 @@ describe("配置接口", () => {
       values: Record<string, unknown>;
       readonlyModeNote: string;
     };
-    expect(data.schema.map((field) => field.key)).toContain("powershellMode");
+    expect(data.schema.map((field) => field.key)).toContain("shellMode");
     expect(data.values.model).toBe(deps.settings.model);
     expect(data.values.apiKeySet).toBe(true);
     expect(JSON.stringify(data)).not.toContain("test-key");
   });
 
   it("readonly 档下给出灰字说明，full 档下为空", async () => {
-    deps.settings.powershellMode = "readonly";
+    deps.settings.shellMode = "readonly";
     const note = (await (await getConfig(TOKEN)).json()) as { readonlyModeNote: string };
     expect(note.readonlyModeNote).toContain("readonly");
 
-    deps.settings.powershellMode = "full";
+    deps.settings.shellMode = "full";
     const full = (await (await getConfig(TOKEN)).json()) as { readonlyModeNote: string };
     expect(full.readonlyModeNote).toBe("");
   });
@@ -655,29 +655,29 @@ describe("配置接口", () => {
     expect(env).toContain("MINIAGENT_MODEL=new-model\n");
   });
 
-  it("PUT 改 powershellMode 后工具表立即变化", async () => {
-    expect(deps.registry.has("powershell")).toBe(false);
+  it("PUT 改 shellMode 后工具表立即变化", async () => {
+    expect(deps.registry.has("shell")).toBe(false);
 
-    const on = await putConfig({ values: { powershellMode: "full" } }, TOKEN);
+    const on = await putConfig({ values: { shellMode: "full" } }, TOKEN);
     expect(on.status).toBe(200);
-    expect(deps.settings.powershellMode).toBe("full");
-    expect(deps.registry.has("powershell")).toBe(true);
+    expect(deps.settings.shellMode).toBe("full");
+    expect(deps.registry.has("shell")).toBe(true);
 
-    const off = await putConfig({ values: { powershellMode: "off" } }, TOKEN);
+    const off = await putConfig({ values: { shellMode: "off" } }, TOKEN);
     expect(off.status).toBe(200);
-    expect(deps.registry.has("powershell")).toBe(false);
+    expect(deps.registry.has("shell")).toBe(false);
   });
 
   it("校验失败返回 400，且 .env 与 settings 都不变", async () => {
-    const before = deps.settings.powershellMode;
-    const response = await putConfig({ values: { powershellMode: "read-only" } }, TOKEN);
+    const before = deps.settings.shellMode;
+    const response = await putConfig({ values: { shellMode: "read-only" } }, TOKEN);
     expect(response.status).toBe(400);
     const data = (await response.json()) as { errors: Array<{ key: string }> };
-    expect(data.errors[0]!.key).toBe("powershellMode");
-    expect(deps.settings.powershellMode).toBe(before);
+    expect(data.errors[0]!.key).toBe("shellMode");
+    expect(deps.settings.shellMode).toBe(before);
 
     const env = await readFile(deps.settings.envFile, "utf-8").catch(() => "");
-    expect(env).not.toContain("MINIAGENT_POWERSHELL_MODE");
+    expect(env).not.toContain("MINIAGENT_SHELL_MODE");
   });
 
   it("secret 留空表示保持原值，填了才覆盖", async () => {

@@ -198,7 +198,7 @@ type AdminAuth = { ok: true } | { ok: false; status: number; error: string };
 /**
  * 配置接口的鉴权。
  *
- * 为什么必须鉴权：这个接口能写 .env 并把 powershellMode 切成 full —— 等于把本机执行权
+ * 为什么必须鉴权：这个接口能写 .env 并把 shellMode 切成 full —— 等于把本机执行权
  * 交给任何能访问到 HTTP 端口的人。而 README 里的在线演示实例是公网且无鉴权的。
  * 未配置令牌时直接 403（即关闭接口），而不是「不校验就放行」。
  */
@@ -230,7 +230,7 @@ function handleConfigRead(response: ServerResponse, settings: Settings): void {
       values: readConfigValues(settings),
       // readonly 是二值开关表达不了的第三态：开关显示为关，旁边用这句说明
       readonlyModeNote:
-        settings.powershellMode === "readonly"
+        settings.shellMode === "readonly"
           ? "当前为 readonly（只读白名单，非开关状态）；保存开关会把它覆盖为 off 或 full"
           : "",
     }),

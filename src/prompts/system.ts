@@ -65,19 +65,19 @@ const toolPolicy: PromptSegment = {
         "- 技能只写指引、不写代码；技能目录会跨会话长期生效，别把一次性的临时步骤写进去。",
       );
     }
-    if (context.toolNames.includes("powershell")) {
+    if (context.toolNames.includes("shell")) {
       // 语法示例必须按平台给：在 Linux 上说要「用 Get-Date」会把模型带错
       const windows = process.platform === "win32";
       const timeExample = windows ? "Get-Date" : "date";
       lines.push(
-        `- 需要当前日期时间、本机环境信息或要跑命令行工具（git 等）时用 powershell（如 ${timeExample}）。`,
+        `- 需要当前日期时间、本机环境信息或要跑命令行工具（git 等）时用 shell（如 ${timeExample}）。`,
         "- 你的知识不含实时时间；问到「现在」必须实际调用工具，不要凭记忆或推测作答。",
       );
       // 有了脚本这条通道，「循环 / 批量计算 / 反复试错」就不必硬凑工具调用来表达
       if (context.toolNames.includes("write_file")) {
         lines.push(
           "- 需要循环、批量计算或反复试错时，别硬凑工具调用：用 write_file 把脚本写到 scripts/，",
-          "  再用 powershell 执行（node scripts/x.js / python scripts/x.py），按 stdout 判断结果。",
+          "  再用 shell 执行（node scripts/x.js / python scripts/x.py），按 stdout 判断结果。",
         );
         lines.push(
           windows

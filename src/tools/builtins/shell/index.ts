@@ -13,7 +13,7 @@
  *   `readonly` 各平台用各自的方式限制「只能读」（默认档）
  *   `full`     不限制，等价于把整台机器交给模型
  *
- * full 档下强烈建议 `MINIAGENT_APPROVAL_TOOLS=powershell`：本框架的人工审批是整批挂起，
+ * full 档下强烈建议 `MINIAGENT_APPROVAL_TOOLS=shell`：本框架的人工审批是整批挂起，
  * 能让每次执行都过一次人的眼睛。
  */
 
@@ -29,7 +29,7 @@ import { posixAdapter } from "./posix.js";
 import { powershellAdapter } from "./powershell.js";
 import type { ShellAdapter } from "./types.js";
 
-export const POWERSHELL_TOOL_NAME = "powershell";
+export const SHELL_TOOL_NAME = "shell";
 
 /**
  * full 档允许单次执行的最长时间。
@@ -58,8 +58,8 @@ export function selectAdapter(platform: NodeJS.Platform): ShellAdapter {
  */
 export function describeShell(settings: Settings): string {
   const adapter = selectAdapter(process.platform);
-  const executable = adapter.executable(settings.powershellExecutable);
-  switch (settings.powershellMode) {
+  const executable = adapter.executable(settings.shellExecutable);
+  switch (settings.shellMode) {
     case "off":
       return "未启用（通用执行通道关闭）";
     case "readonly":
@@ -67,27 +67,27 @@ export function describeShell(settings: Settings): string {
     default:
       return (
         `full 档 · ${executable} · 命令不受限制：` +
-        `建议把 ${POWERSHELL_TOOL_NAME} 加进 MINIAGENT_APPROVAL_TOOLS 走人工审批`
+        `建议把 ${SHELL_TOOL_NAME} 加进 MINIAGENT_APPROVAL_TOOLS 走人工审批`
       );
   }
 }
 
-export async function registerPowershell(
+export async function registerShell(
   registry: ToolRegistry,
   settings: Settings,
 ): Promise<void> {
-  const mode = settings.powershellMode;
+  const mode = settings.shellMode;
   if (mode === "off") return;
 
   const adapter = selectAdapter(process.platform);
-  const executable = adapter.executable(settings.powershellExecutable);
+  const executable = adapter.executable(settings.shellExecutable);
   // 工作目录固定为 workspace：相对路径天然落在沙箱内，绝对路径则不受限（这一点在工具描述里写明）
   const cwd = resolve(settings.workspace);
   await mkdir(cwd, { recursive: true });
 
   // 单次能跑多久由档位决定：full 档要跑脚本/构建，允许调大；
   // readonly 档的用途是「取时间、看信息」，没有理由让它长时间占着进程。
-  const configuredTimeout = settings.powershellTimeout;
+  const configuredTimeout = settings.shellTimeout;
   const maxTimeoutSeconds =
     mode === "full" ? Math.max(configuredTimeout, MAX_EXEC_TIMEOUT_SECONDS) : configuredTimeout;
 
@@ -103,7 +103,7 @@ export async function registerPowershell(
 
   registry.register(
     defineTool({
-      name: POWERSHELL_TOOL_NAME,
+      name: SHELL_TOOL_NAME,
       description:
         `在本机执行一条命令，返回 stdout / stderr 与退出码。${adapter.usageHint()}` +
         "适合：获取当前时间、查看系统与进程信息、跑 git 等命令行工具、批量查看文件、" +

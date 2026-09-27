@@ -13,7 +13,7 @@ import {
 process.env.MINIAGENT_DEEPSEEK_API_KEY = "sk-test-1234";
 
 function makeSettings(): Settings {
-  return { ...loadSettings(), powershellMode: "readonly", adminToken: "t" };
+  return { ...loadSettings(), shellMode: "readonly", adminToken: "t" };
 }
 
 describe("CONFIG_FIELDS", () => {
@@ -38,7 +38,7 @@ describe("normalizeConfigValues", () => {
       maxIterations: 12,
       planMode: false,
       approvalTools: ["write_file", "powershell"],
-      powershellMode: "full",
+      shellMode: "full",
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -46,7 +46,7 @@ describe("normalizeConfigValues", () => {
       maxIterations: 12,
       planMode: false,
       approvalTools: ["write_file", "powershell"],
-      powershellMode: "full",
+      shellMode: "full",
     });
   });
 
@@ -57,11 +57,11 @@ describe("normalizeConfigValues", () => {
     expect(result.normalized.approvalTools).toEqual(["write_file", "powershell"]);
   });
 
-  it("拒绝非法 powershellMode", () => {
-    const result = normalizeConfigValues({ powershellMode: "read-only" });
+  it("拒绝非法 shellMode", () => {
+    const result = normalizeConfigValues({ shellMode: "read-only" });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.errors[0]!.key).toBe("powershellMode");
+    expect(result.errors[0]!.key).toBe("shellMode");
   });
 
   it("拒绝未知字段、未知 provider、非整数与越界数字", () => {
@@ -99,16 +99,16 @@ describe("applyConfigValues", () => {
     const settings = makeSettings();
     const changed = applyConfigValues(settings, {
       maxIterations: 12,
-      powershellMode: "full",
+      shellMode: "full",
     });
-    expect(changed.sort()).toEqual(["maxIterations", "powershellMode"]);
+    expect(changed.sort()).toEqual(["maxIterations", "shellMode"]);
     expect(settings.maxIterations).toBe(12);
-    expect(settings.powershellMode).toBe("full");
+    expect(settings.shellMode).toBe("full");
   });
 
   it("值没变就不算变化项（避免无谓地重注册工具）", () => {
     const settings = makeSettings();
-    const changed = applyConfigValues(settings, { powershellMode: "readonly" });
+    const changed = applyConfigValues(settings, { shellMode: "readonly" });
     expect(changed).toEqual([]);
   });
 

@@ -1,4 +1,4 @@
-/** 重注册：只有被闭包捕获的工具（powershell、文件工具）需要重建。 */
+/** 重注册：只有被闭包捕获的工具（shell、文件工具）需要重建。 */
 
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -21,8 +21,8 @@ beforeEach(async () => {
   settings = {
     ...loadSettings(),
     workspace: join(tempDir, "ws-a"),
-    powershellMode: "off",
-    powershellExecutable: "",
+    shellMode: "off",
+    shellExecutable: "",
   };
 });
 
@@ -31,28 +31,28 @@ afterEach(async () => {
 });
 
 describe("reapplyTools", () => {
-  it("off → full 会把 powershell 注册进来", async () => {
+  it("off → full 会把 shell 注册进来", async () => {
     const registry = new ToolRegistry();
-    await reapplyTools(registry, settings, ["powershellMode"]);
-    expect(registry.has("powershell")).toBe(false);
+    await reapplyTools(registry, settings, ["shellMode"]);
+    expect(registry.has("shell")).toBe(false);
 
-    settings.powershellMode = "full";
-    await reapplyTools(registry, settings, ["powershellMode"]);
-    expect(registry.has("powershell")).toBe(true);
+    settings.shellMode = "full";
+    await reapplyTools(registry, settings, ["shellMode"]);
+    expect(registry.has("shell")).toBe(true);
   });
 
-  it("full → off 会把 powershell 移除，且不抛错", async () => {
-    settings.powershellMode = "full";
+  it("full → off 会把 shell 移除，且不抛错", async () => {
+    settings.shellMode = "full";
     const registry = new ToolRegistry();
-    await reapplyTools(registry, settings, ["powershellMode"]);
-    expect(registry.has("powershell")).toBe(true);
+    await reapplyTools(registry, settings, ["shellMode"]);
+    expect(registry.has("shell")).toBe(true);
 
-    settings.powershellMode = "off";
-    await reapplyTools(registry, settings, ["powershellMode"]);
-    expect(registry.has("powershell")).toBe(false);
+    settings.shellMode = "off";
+    await reapplyTools(registry, settings, ["shellMode"]);
+    expect(registry.has("shell")).toBe(false);
     // 再切一次：off 档下没有可删的，也不该抛
-    await reapplyTools(registry, settings, ["powershellMode"]);
-    expect(registry.has("powershell")).toBe(false);
+    await reapplyTools(registry, settings, ["shellMode"]);
+    expect(registry.has("shell")).toBe(false);
   });
 
   it("改 workspace 后文件工具落在新根目录", async () => {
@@ -69,11 +69,11 @@ describe("reapplyTools", () => {
     expect(existsSync(join(tempDir, "ws-a", "b.txt"))).toBe(false);
   });
 
-  it("改 workspace 时 powershell 也要重注册（它的 cwd 绑在 workspace 上）", async () => {
-    settings.powershellMode = "full";
+  it("改 workspace 时 shell 也要重注册（它的 cwd 绑在 workspace 上）", async () => {
+    settings.shellMode = "full";
     const registry = new ToolRegistry();
     await reapplyTools(registry, settings, ["workspace"]);
-    expect(registry.has("powershell")).toBe(true);
+    expect(registry.has("shell")).toBe(true);
   });
 
   it("不相关的变更不动工具表", async () => {
