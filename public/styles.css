@@ -991,6 +991,33 @@ body::after {
 
 /* ---------------- 配置菜单 ---------------- */
 
+/* 当前会话标识：与 model-badge 同形，但更弱——它是状态说明，不是可点的控件 */
+.session-badge {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 260px;
+  padding: 7px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 100px;
+  background: var(--bg-soft);
+}
+
+.session-badge-label {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+#sessionTitle {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--ink-soft);
+}
+
 .config-wrap {
   position: relative;
 }
@@ -1119,6 +1146,8 @@ body::after {
   .dock-wrap { padding-left: 18px; padding-right: 18px; }
   .msg-user { max-width: 92%; }
   .step-args { max-width: 160px; }
+  /* 窄屏上顶栏放不下，会话标识先让位（历史面板里仍能看出当前是哪个会话） */
+  .session-badge { display: none; }
   .config-panel { width: calc(100vw - 36px); }
   .config-field > label { flex: 0 0 96px; }
   .config-hint { margin-left: 106px; }

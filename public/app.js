@@ -21,6 +21,8 @@ const newChatBtn = document.querySelector("#newChatBtn");
 const configWrap = document.querySelector(".config-wrap");
 const configBtn = document.querySelector("#configBtn");
 const configPanel = document.querySelector("#configPanel");
+const sessionBadge = document.querySelector("#sessionBadge");
+const sessionTitle = document.querySelector("#sessionTitle");
 
 /** 单条输入/输出展示的最大字符数，超出则截断（完整内容见原始轨迹） */
 const MAX_IO_CHARS = 20000;
@@ -330,6 +332,8 @@ function createAssistantCard(container, userMessage) {
       if (runId) answerEl.appendChild(makeTraceViewer(runId));
       chatHistory.push({ role: "user", content: userMessage });
       chatHistory.push({ role: "assistant", content: meta.answer });
+      // 新会话的标题由服务端从首个提问推导，首轮落盘后才拿得到
+      void refreshSessionTitle();
       scrollToBottom();
     },
 
@@ -455,6 +459,56 @@ async function toggleTrace(btn, panel, runId) {
 
 /* ---------------- 会话历史（持久化 / 恢复 / 切换） ---------------- */
 
+/**
+ * 当前会话 id 记在 sessionStorage（**每个标签页一份**），不是 localStorage。
+ *
+ * 起因是一个实测出来的问题：早先页面加载时无条件接管「最近那个会话」，而 sessionId 是页面级变量。
+ * 于是新开标签页（或刷新）都会抢到同一个会话——两边的问题与回答交错写进同一份历史；
+ * 更常见的是你以为在开新对话，实际是旧会话的续聊，新问题的回答因此接着旧内容走。
+ *
+ * 换成 sessionStorage 后语义就对了：
+ *   新标签页 → 没有记录 → 从新对话开始
+ *   同一标签页刷新 → 有记录 → 回到刚才那个会话，不丢进度
+ *   两个标签页 → 各记各的，互不干扰
+ */
+const SESSION_KEY = "miniagent.sessionId";
+
+/** 当前会话 id 的唯一写入口：同步 sessionStorage 与顶栏标识 */
+function setSessionId(id) {
+  sessionId = id ?? null;
+  if (sessionId) sessionStorage.setItem(SESSION_KEY, sessionId);
+  else sessionStorage.removeItem(SESSION_KEY);
+}
+
+/** 顶栏显示「在哪个会话」；标题未知（新会话还没落盘）时整块隐藏 */
+function showSessionLabel(title) {
+  if (title) {
+    sessionTitle.textContent = title;
+    sessionBadge.hidden = false;
+  } else {
+    sessionTitle.textContent = "";
+    sessionBadge.hidden = true;
+  }
+}
+
+/**
+ * 新会话的标题由服务端在首轮落盘时从首个提问推导，所以这一轮跑完才拿得到。
+ * 只在标题还空着时拉一次，避免每轮都多一个请求。
+ */
+async function refreshSessionTitle() {
+  if (!sessionId || sessionTitle.textContent) return;
+  const target = sessionId;
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(target)}`);
+    if (!response.ok) return;
+    const session = await response.json();
+    // 期间可能已经切走会话，别把标题写到别的会话上
+    if (session.id === target) showSessionLabel(session.title);
+  } catch {
+    // 拿不到标题不影响使用
+  }
+}
+
 /** 隐藏欢迎页并确保消息容器存在；返回该容器 */
 function ensureThread() {
   if (welcome) welcome.hidden = true;
@@ -471,7 +525,8 @@ function ensureThread() {
 /** 开新对话：清空界面与上下文，回到欢迎页 */
 function startNewChat() {
   if (busy) return;
-  sessionId = null;
+  setSessionId(null);
+  showSessionLabel("");
   chatHistory = [];
   const inner = document.querySelector("#threadInner");
   if (inner) inner.remove();
@@ -480,33 +535,36 @@ function startNewChat() {
   input.focus();
 }
 
-/** 页面加载时恢复最近一次会话；没有历史则保留欢迎页 */
-async function restoreLatestSession() {
-  try {
-    const response = await fetch("/api/sessions");
-    if (!response.ok) return;
-    const data = await response.json();
-    const latest = (data.sessions ?? [])[0];
-    if (latest) await openSession(latest.id);
-  } catch {
-    // 拉不到历史不影响正常使用，静默保留欢迎页
-  }
+/**
+ * 页面加载时只恢复**本标签页**上次的会话。
+ * 新标签页没有记录，于是停在欢迎页、从新对话开始——这是「新开页面 = 新对话」应有的语义。
+ */
+async function restoreTabSession() {
+  const saved = sessionStorage.getItem(SESSION_KEY);
+  if (!saved) return;
+  if (await openSession(saved)) return;
+  // 会话已被删除、或换了实例：清掉记录，回到新对话
+  setSessionId(null);
+  showSessionLabel("");
 }
 
-/** 打开某个历史会话并渲染 */
+/** 打开某个历史会话并渲染；返回是否真的打开了 */
 async function openSession(id) {
-  if (busy) return;
+  if (busy) return false;
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
-    if (!response.ok) return;
+    if (!response.ok) return false;
     renderSession(await response.json());
+    return true;
   } catch {
-    // 忽略：会话可能刚被删除
+    // 会话可能刚被删除
+    return false;
   }
 }
 
 function renderSession(session) {
-  sessionId = session.id;
+  setSessionId(session.id);
+  showSessionLabel(session.title);
   chatHistory = session.messages.map((turn) => ({ role: turn.role, content: turn.content }));
 
   const inner = ensureThread();
@@ -1015,8 +1073,8 @@ document.addEventListener("click", (event) => {
   closeHistoryPanel();
 });
 
-// 启动即尝试恢复上次会话
-void restoreLatestSession();
+// 启动即恢复**本标签页**上次的会话（新标签页没有记录，于是从新对话开始）
+void restoreTabSession();
 
 /* ---------------- SSE 流式通信 ---------------- */
 
@@ -1062,7 +1120,7 @@ async function streamChat(message, card) {
           currentRunId = parsed.data.run_id;
           card.setRunId(currentRunId);
           // 服务端下发会话 id：记录下来，后续请求续写同一会话
-          if (parsed.data.session_id) sessionId = parsed.data.session_id;
+          if (parsed.data.session_id) setSessionId(parsed.data.session_id);
           // 点击停止早于 runId 到达：立即补发
           if (stopRequested) void doStop(currentRunId);
           break;

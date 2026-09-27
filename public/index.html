@@ -36,6 +36,11 @@
           <span class="status-dot" id="statusDot"></span>
           <span id="modelName">deepseek-flash</span>
         </div>
+        <!-- 当前在哪个会话：不说清这件事，「新开页面」很容易被误当成新对话 -->
+        <div class="session-badge" id="sessionBadge" hidden>
+          <span class="session-badge-label">会话</span>
+          <span id="sessionTitle"></span>
+        </div>
         <div class="config-wrap">
           <button id="configBtn" class="top-btn" aria-expanded="false">配置</button>
           <div id="configPanel" class="config-panel" hidden></div>
