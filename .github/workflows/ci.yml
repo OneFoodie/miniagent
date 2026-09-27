@@ -128,7 +128,29 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           SERVICE_NAME: ${{ secrets.SERVICE_NAME || 'miniagent' }}
         run: |
-          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
-            "cd '$DEPLOY_PATH' && \
-             npm ci --omit=dev --omit=optional --no-audit --no-fund && \
-             sudo systemctl restart '$SERVICE_NAME'"
+          # 远端脚本用 heredoc 送过去（`bash -s`），避免多层引号转义；
+          # heredoc 不加引号，所以 $DEPLOY_PATH 等在本地展开、\$() 留给远端执行。
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" bash -s <<REMOTE
+          set -e
+          cd '$DEPLOY_PATH'
+          # umask 必须显式设成 022：服务器实测 umask 是 027，npm 会把 node_modules
+          # 建成 drwxr-x--- root:root，服务用户读不到，重启后直接 ERR_MODULE_NOT_FOUND
+          # 崩溃循环（已实测踩到）。
+          umask 0022
+          npm ci --omit=dev --omit=optional --no-audit --no-fund
+          chmod -R a+rX node_modules
+          # 配置菜单要改写 .env（原子写会在部署目录建临时文件再 rename），
+          # 所以部署目录与 .env 都得让服务用户所在组可写。组名从 systemd 取，不写死。
+          SVC_GROUP=\$(systemctl show '$SERVICE_NAME' -p Group --value)
+          if [ -n "\$SVC_GROUP" ] && [ "\$SVC_GROUP" != root ]; then
+            chgrp "\$SVC_GROUP" '$DEPLOY_PATH'
+            chmod 775 '$DEPLOY_PATH'
+            if [ -f '$DEPLOY_PATH/.env' ]; then
+              chgrp "\$SVC_GROUP" '$DEPLOY_PATH/.env'
+              chmod 660 '$DEPLOY_PATH/.env'
+            fi
+          fi
+          sudo systemctl restart '$SERVICE_NAME'
+          sleep 3
+          systemctl is-active '$SERVICE_NAME'
+          REMOTE
