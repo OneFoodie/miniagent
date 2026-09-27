@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 
 import type { Message } from "../core/types.js";
 import type { ToolFact } from "./context.js";
+import type { RunState } from "./state.js";
 
 /** 等待人工审批的工具调用 */
 export interface PendingApproval {
@@ -47,6 +48,12 @@ export interface RunCheckpoint {
    * 可选是为了兼容加这个字段之前写下的存档。
    */
   tools?: ToolFact[];
+  /**
+   * 运行状态（首轮计划 + 工具失败计数）。
+   * 可选，理由同上：兼容加这个字段之前写下的存档——缺失时从 iterations / tools
+   * 重建一份等价状态，续跑出来的那一轮因此不会丢掉「什么失败过」。
+   */
+  state?: RunState;
   /** 已做出的审批决定：callId → 是否批准 */
   approvals: Record<string, boolean>;
   /** 当前等待决定的调用；为空表示是「中断后待续跑」而不是「等审批」 */

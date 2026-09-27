@@ -8,7 +8,7 @@
 import { PromptBuilder, type PromptSegment } from "./builder.js";
 
 /** 整体提示词版本：段有各自版本，此处记录一次整体口径的版本，便于快速比对 */
-export const SYSTEM_PROMPT_ID = "research_agent_system@2.0.0";
+export const SYSTEM_PROMPT_ID = "research_agent_system@2.1.0";
 
 const identity: PromptSegment = {
   id: "identity",
@@ -19,16 +19,16 @@ const identity: PromptSegment = {
 
 const principles: PromptSegment = {
   id: "principles",
-  version: "1.1.0",
+  version: "1.2.0",
   render: () => `## 核心原则
-- 高效：用最少的工具调用完成任务。整个会话最多调用 8 次工具。
+- 高效：用最少的工具调用完成任务；已用多少步、上限多少，见「当前进度」。
 - 果断：搜索 1-3 次通常就够了。拿到 snippet 摘要后直接作答，不要反复搜索同一话题。
 - 诚实：信息不足时基于已有信息给最佳回答，标注局限即可。`,
 };
 
 const toolPolicy: PromptSegment = {
   id: "tool_policy",
-  version: "1.8.0",
+  version: "1.9.0",
   render: (context) => {
     const lines = [
       "## 工具使用规则",
@@ -38,6 +38,14 @@ const toolPolicy: PromptSegment = {
       "- 任何工具失败后禁止相同参数重试，换关键词或基于现有信息作答。",
       "- 涉及数值计算用 calculator，不要心算。",
     ];
+    // 计划引导：只在启用计划模式时出现。它不额外调用模型——模型在首轮发起工具调用的
+    // 同时给出计划即可，运行期把那段话记进状态，后续每轮由「当前进度」段带回来。
+    if (context.planMode) {
+      lines.push(
+        "- 需要两步以上工具调用的任务，动手前先用一句话给出计划（3-5 步）再开始调用工具；",
+        "  这段计划会被记下来、在后续每轮的「当前进度」里带着，作为你的锚点。简单任务不必给。",
+      );
+    }
     // 按需提示属于「怎么用这些工具」，先放完，最后才是独立的证据规则小节
     if (context.toolNames.includes("search_knowledge")) {
       lines.push(
@@ -99,6 +107,22 @@ const toolPolicy: PromptSegment = {
   },
 };
 
+/**
+ * 当前进度：由运行期每轮渲染（步数、计划、已执行过的工具、反复失败的工具）。
+ *
+ * 为什么放在系统提示词而不是历史消息里：它是「环境事实」，不是对话内容。
+ * 拼进消息序列会和上一轮的 assistant 输出混在一起（模型容易把它当成自己说过的话），
+ * 也会一直堆在历史里；放这里每轮覆盖，模型看到的是当下状态，历史保持干净。
+ */
+const progress: PromptSegment = {
+  id: "progress",
+  version: "1.0.0",
+  render: (context) => {
+    const text = context.progress?.trim();
+    return text ? `## 当前进度\n${text}` : "";
+  },
+};
+
 /** 技能目录：只放摘要，正文靠 load_skill 按需加载（渐进式披露，省 token） */
 const skillsCatalog: PromptSegment = {
   id: "skills_catalog",
@@ -157,6 +181,8 @@ export const DEFAULT_PROMPT_SEGMENTS: PromptSegment[] = [
   identity,
   principles,
   toolPolicy,
+  // 进度紧接工具策略：两段说的都是「当下环境」，读起来连续
+  progress,
   skillsCatalog,
   memorySummary,
   recalledMemory,

@@ -25,6 +25,16 @@ export interface PromptContext {
    * 模型会说「这行是我自己敲的，也是我编的」而不认账；放进系统提示词，它才有"这不是我写的"这个判断。
    */
   executionLedger?: Array<{ name: string; ok: boolean }>;
+  /**
+   * 本次运行的当前进度（已用/剩余步数、计划、已执行工具、反复失败的工具），
+   * 由运行期每轮渲染后传入。为空串表示没有进度段（如子 agent 首次调用前）。
+   */
+  progress?: string;
+  /**
+   * 是否启用计划模式：为真时提示词会要求模型在首轮给出简短计划
+   * （对应 MINIAGENT_PLAN_MODE，见 agent/state.ts 的 plan 字段）。
+   */
+  planMode?: boolean;
 }
 
 /** 提示词的一个片段 */

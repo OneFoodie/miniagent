@@ -2,7 +2,7 @@
 
 从零手写的教学级 Agent 框架：**TypeScript 5 + Node.js 22+**，运行时不依赖任何框架。
 
-- **ReAct 主循环** — reason → act → observe；同批工具调用并发执行，带信号量限流、独立超时、故障隔离
+- **ReAct 主循环** — reason → act → observe，走向由纯函数路由决定；同批工具调用并发执行（信号量限流、独立超时、故障隔离）；**每轮把进度与计划注入上下文**，步数用尽时收尾作答而不是直接报错
 - **多模型服务商** — 只依赖 OpenAI 兼容协议：DeepSeek / OpenAI / Moonshot / 通义 / 智谱 / Ollama / 自建网关，换一家只改一个变量
 - **token 级流式** — SSE 增量逐字透出，tool_calls 分片按下标累积
 - **MCP 工具来源** — 配 `mcp.json` 即可把远端 MCP 服务端的工具接成内置工具（不配则不加载 SDK）
@@ -61,6 +61,7 @@ npm start                     # → http://localhost:3000
 | `MINIAGENT_BASE_URL` / `MINIAGENT_MODEL` | 取预设 | 覆盖预设的接入点与模型名（自建网关走这两项） |
 | `MINIAGENT_STREAM_ENABLED` | `true` | 是否用 token 级流式请求 |
 | `MINIAGENT_MAX_ITERATIONS` | `8` | 单轮最多迭代次数 |
+| `MINIAGENT_PLAN_MODE` | `true` | 计划模式：要求模型在多步任务上先给一句话计划，运行期记进状态并在「当前进度」里带上（不额外调用模型） |
 | `MINIAGENT_MODEL_CONTEXT_TOKENS` | `131072` | 模型上下文窗口；历史预算按它推导 |
 | `MINIAGENT_MEMORY_BUDGET_RATIO` | `0.25` | 历史预算占窗口的比例（换模型只需改上面那项） |
 | `MINIAGENT_MEMORY_BACKEND` | 自动 | `jsonl` / `lifecycle` / `memos` |
@@ -433,6 +434,5 @@ npx vitest run -u
 | powershell 的 readonly 是「防误用」 | 白名单命令名 + 拒绝元字符，能挡住绝大多数误操作与模型越界；但**不是对抗有恶意模型的沙箱**，也能读到 workspace 之外的路径。需要硬隔离就设 `MINIAGENT_POWERSHELL_MODE=off` |
 | mermaid 需联网 | 流程图渲染按需从 jsdelivr 取 mermaid（页面本来也从 Google Fonts 取字体）；取不到时降级成「提示 + 源码」，不会静默丢内容。要彻底离线可用，就把它从 `app.js` 的 `loadMermaid` 里去掉，只用 ` ```svg ` |
 | 控制台有一条无害的 console 报错 | SSE 收到 `done` 后不再读响应体，浏览器记一条 `net::ERR_ABORTED`。代码里已显式容忍（[app.js](public/app.js) 的 `streamChat` catch 分支），不影响渲染；清掉它需要在 `done` 分支补 `reader.cancel()`，但那会触发服务端的连接关闭回调，收益不抵风险，故保留 |
-| 提示词口径可能与配置不一致 | `principles` 段写死「整个会话最多调用 8 次工具」，而实际限制是 `MINIAGENT_MAX_ITERATIONS` 的**迭代轮数**（每轮可并发多个工具），且计数每次提问都会重置；段文本不随配置联动。明细见[设计文档](docs/superpowers/specs/2026-09-23-miniagent-design.md) 第 7.1 与第 10 节 |
 | 采样参数不可配 | 请求体不发 `temperature` / `top_p` / `max_tokens` / `stop`，随机性与输出长度上限全由服务商默认值决定 |
 | 身份与输出口径写死 | `identity` 段固定「研究助手」、`output_format` 固定「结构化中文回答」，与现有能力（写脚本、自建技能、跑本机命令）和英文提问场景不完全匹配 |

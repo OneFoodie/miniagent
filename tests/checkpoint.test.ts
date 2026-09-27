@@ -234,10 +234,12 @@ describe("人工审批（HITL）", () => {
 
 describe("断点续跑", () => {
   it("从最后一轮的工具结果处接着跑，不重跑已完成的迭代", async () => {
-    // 第一段：只允许 1 轮，于是第 1 轮跑完（存档已写）后因超轮次失败
+    // 第一段：只允许 1 轮。第 1 轮跑完（存档已写）后进入收尾节点，而收尾调用的
+    // content 为空 → 仍以 AgentLimitError 收场，存档因此保留在磁盘上
     const settings = await testSettings({ maxIterations: 1 });
     const first = new FakeLLM([
       toolCallResponse([["c1", "calculator", { expression: "3*3" }]]),
+      finalResponse(""),
     ]);
     const runId = await new Agent(first, makeRegistry(), settings, new EventBus())
       .run("算一下")

@@ -114,15 +114,66 @@ describe("Agent loop", () => {
     expect(toolMessage.content).toContain("工具执行失败");
   });
 
-  it("超过最大轮次抛错", async () => {
-    const looping = toolCallResponse([
-      ["c1", "calculator", { expression: "1+1" }],
+  it("步数用尽时收尾作答，而不是直接抛错", async () => {
+    const looping = toolCallResponse([["c1", "calculator", { expression: "1+1" }]]);
+    // 3 轮工具调用把步数耗尽，第 4 次调用是收尾节点发起的（不再允许调工具）
+    const fake = new FakeLLM([
+      looping,
+      looping,
+      looping,
+      finalResponse("基于已有信息作答：1+1=2"),
     ]);
-    const fake = new FakeLLM([looping, looping, looping]);
-    await expect(makeAgent(fake).run("无限循环")).rejects.toBeInstanceOf(
-      AgentLimitError,
+    const result = await makeAgent(fake).run("无限循环");
+
+    expect(result.answer).toBe("基于已有信息作答：1+1=2");
+    expect(fake.calls).toHaveLength(4);
+  });
+
+  it("连收尾都没给出回答时才抛 AgentLimitError", async () => {
+    const looping = toolCallResponse([["c1", "calculator", { expression: "1+1" }]]);
+    // 收尾调用的 content 为空 → 手里没有任何可交付的答案，只能如实报错
+    const fake = new FakeLLM([looping, looping, looping, finalResponse("")]);
+
+    await expect(makeAgent(fake).run("无限循环")).rejects.toBeInstanceOf(AgentLimitError);
+  });
+
+  it("每轮刷新系统提示词：进度进入当轮上下文", async () => {
+    const fake = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "1+1" }]]),
+      finalResponse("2"),
+    ]);
+    await makeAgent(fake).run("算一下");
+
+    const firstSystem = fake.calls[0]!.messages[0]!.content ?? "";
+    const secondSystem = fake.calls[1]!.messages[0]!.content ?? "";
+    // 首轮还没执行任何工具
+    expect(firstSystem).toContain("已用 0/3 步");
+    // 第二轮：已用 1 步、并列出刚执行过的工具——这正是原先提示词冻结时模型看不到的
+    expect(secondSystem).toContain("已用 1/3 步");
+    expect(secondSystem).toContain("calculator 成功");
+  });
+
+  it("首轮给出的计划被记下，并出现在后续进度里", async () => {
+    const fake = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "2*3" }]], "先算乘法；再核对结果"),
+      finalResponse("6"),
+    ]);
+    const result = await makeAgent(fake).run("帮我算");
+
+    expect(fake.calls[1]!.messages[0]!.content ?? "").toContain(
+      "计划：1) 先算乘法；2) 再核对结果",
     );
-    expect(fake.calls).toHaveLength(3);
+    expect(result.answer).toBe("6");
+  });
+
+  it("同一工具反复失败时，进度里给出换路子的引导", async () => {
+    const failing = toolCallResponse([["c1", "calculator", { expression: "1 +" }]]);
+    const fake = new FakeLLM([failing, failing, finalResponse("两次都失败了")]);
+    await makeAgent(fake).run("算个错的表达式");
+
+    const thirdSystem = fake.calls[2]!.messages[0]!.content ?? "";
+    expect(thirdSystem).toContain("已连续失败 2 次");
+    expect(thirdSystem).toContain("先说明失败原因再换思路");
   });
 
   it("模型重试耗尽时发出 llm_error 事件", async () => {

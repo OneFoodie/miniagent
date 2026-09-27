@@ -38,6 +38,9 @@ describe("PromptBuilder", () => {
       memorySummary: "用户偏好简洁回答",
       recalledMemory: ["上周问过 DeepSeek 发布时间"],
       toolNames: ["web_search", "load_skill", "search_knowledge"],
+      // 带上进度与计划模式：让快照同时覆盖新增的两处，成为真正的防漂移闸门
+      progress: "已用 1/8 步。\n计划：1) 查资料；2) 汇总",
+      planMode: true,
     });
 
     // 这两份快照是提示词的防漂移闸门：有意修改后需 `npm test -- -u` 显式接受变更
@@ -58,6 +61,26 @@ describe("PromptBuilder", () => {
     expect(text).toContain("用户偏好简洁回答");
     expect(text).toContain("上周问过 DeepSeek 发布时间");
     expect(text).toContain("load_skill");
+  });
+
+  it("进度段只在有内容时出现", () => {
+    const withProgress = createDefaultPromptBuilder().build({
+      ...baseContext,
+      progress: "已用 1/8 步。\n已执行：calculator 成功",
+    }).text;
+    expect(withProgress).toContain("## 当前进度");
+    expect(withProgress).toContain("已用 1/8 步");
+
+    // 没有进度时不出这一段（例如子 agent 首次调用前）
+    expect(createDefaultPromptBuilder().build(baseContext).text).not.toContain("## 当前进度");
+  });
+
+  it("计划引导只在计划模式打开时出现", () => {
+    const on = createDefaultPromptBuilder().build({ ...baseContext, planMode: true }).text;
+    expect(on).toContain("动手前先用一句话给出计划");
+
+    const off = createDefaultPromptBuilder().build({ ...baseContext, planMode: false }).text;
+    expect(off).not.toContain("动手前先用一句话给出计划");
   });
 
   it("没有技能时不出技能目录段，也没有记忆段", () => {

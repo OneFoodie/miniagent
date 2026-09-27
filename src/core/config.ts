@@ -29,6 +29,12 @@ export interface Settings {
 
   /** Agent */
   maxIterations: number;
+  /**
+   * 计划模式：启用后提示词会要求模型在首轮给出简短计划，运行期把它记进状态，
+   * 并在后续每轮的「当前进度」里带上，作为长任务的锚点（短任务没有代价——
+   * 只是多一句话的引导，不额外调用模型）。
+   */
+  planMode: boolean;
 
   /** 子 agent（run_subagent）：它自己一轮跑多少步、以及单次执行的上限 */
   subagentMaxIterations: number;
@@ -299,6 +305,7 @@ export function loadSettings(): Settings {
     streamEnabled: readBoolean("MINIAGENT_STREAM_ENABLED", true),
 
     maxIterations: readNumber("MINIAGENT_MAX_ITERATIONS", 8),
+    planMode: readBoolean("MINIAGENT_PLAN_MODE", true),
     subagentMaxIterations: readNumber("MINIAGENT_SUBAGENT_MAX_ITERATIONS", 6),
     subagentTimeout: readNumber("MINIAGENT_SUBAGENT_TIMEOUT", 180),
 

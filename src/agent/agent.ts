@@ -29,6 +29,15 @@ import {
   saveCheckpoint,
 } from "./checkpoint.js";
 import { AgentContext, type ToolFact } from "./context.js";
+import { routeAfterReason, routeAtLoopStart } from "./routing.js";
+import {
+  createRunState,
+  rebuildRunState,
+  recordToolResults,
+  renderProgress,
+  setPlan,
+  type RunState,
+} from "./state.js";
 
 const logger = getLogger("miniagent.agent");
 
@@ -126,14 +135,10 @@ export class Agent {
     // 2. 长期记忆召回：按当前问题检索相关历史片段
     const recalled = await this.recall(userInput, context);
 
-    // 3. 组装系统提示词：技能目录 + 记忆摘要 + 召回片段在此注入
-    const prompt = this.promptBuilder.build({
-      skills: this.skills?.catalog() ?? [],
-      memorySummary: this.memory?.currentSummary ?? "",
-      recalledMemory: recalled,
-      toolNames: this.registry.all().map((tool) => tool.name),
-      executionLedger: this.executionLedger,
-    });
+    // 3. 组装系统提示词：技能目录 + 记忆摘要 + 召回片段 + 当前进度
+    //    本次运行的显式状态（计划 / 失败计数）从这里开始累积，见 state.ts
+    const state = createRunState();
+    const prompt = this.buildPrompt(context, state, recalled);
 
     // system 消息始终置顶，其后是历史与本轮输入
     const messages: Message[] = [
@@ -148,7 +153,7 @@ export class Agent {
       createdAt: Date.now(),
       promptVersions: prompt.versions,
     };
-    const execute = () => this.loop(messages, context, meta);
+    const execute = () => this.loop(messages, context, meta, state, recalled);
     let answer: string;
     try {
       // 清理历史卸载产物：它按 run 累积且只增不减，不清理会一直占着磁盘
@@ -228,6 +233,8 @@ export class Agent {
     context.usage.completionTokens = checkpoint.usage.completionTokens;
     // 挂起前已经执行过的工具事实要接着往下传，否则续跑出来的那一轮会丢掉它们
     context.tools.push(...(checkpoint.tools ?? []));
+    // 状态：优先用存档里的；旧存档没有该字段时从已执行工具反推失败计数（见 rebuildRunState）
+    const state = rebuildRunState(checkpoint.state, context.tools);
 
     const messages = [...checkpoint.messages];
     const last = messages.at(-1);
@@ -264,7 +271,8 @@ export class Agent {
     let answer: string;
     try {
       answer = await runIdStorage.run(runId, () =>
-        this.loop(messages, context, meta, pending),
+        // 续跑不做长期召回（与中断前保持一致），因此 recalled 传空
+        this.loop(messages, context, meta, state, [], pending),
       );
     } catch (error) {
       await this.bus.publish(
@@ -315,35 +323,56 @@ export class Agent {
     }
   }
 
-  /** ReAct 主循环：reason（LLM）→ act（并发工具）→ observe（结果回灌） */
+  /**
+   * ReAct 主循环，由路由驱动：reason（LLM）→ act（并发工具）→ observe（结果回灌）。
+   *
+   * 分支不再散在 while / if 里，而是交给 `routing.ts` 的三个纯函数决定走向，
+   * 循环体只负责「按决策执行」。于是「什么时候结束、什么时候挂起、什么时候收尾作答」
+   * 都可以单独测试，读代码时也不必自己去拼。
+   */
   private async loop(
     messages: Message[],
     ctx: AgentContext,
     meta: RunMeta,
+    state: RunState,
+    recalled: string[],
     resume?: ResumeState,
   ): Promise<string> {
     // 恢复时可能已经有一批工具调用在等执行：挂起前 LLM 已经把它们给出来了
     let awaiting: ToolCall[] | undefined = resume?.toolCalls;
     const approvals: Record<string, boolean> = { ...resume?.approvals };
 
-    while (ctx.iterations < this.settings.maxIterations) {
-      if (ctx.cancelled) {
-        throw new AgentCancelledError("Agent 已被取消");
-      }
+    for (;;) {
+      const control = routeAtLoopStart({
+        step: ctx.iterations,
+        maxSteps: this.settings.maxIterations,
+        cancelled: ctx.cancelled,
+      });
+      if (control === "cancelled") throw new AgentCancelledError("Agent 已被取消");
+      // 步数用尽 → 收尾作答，而不是抛错走人
+      if (control === "wrap-up") return this.wrapUp(messages, ctx, state, recalled);
+
+      // 每轮刷新 system 消息：进度、计划、失败、技能目录都可能是新的（见 refreshSystemPrompt）
+      this.refreshSystemPrompt(messages, ctx, state, recalled);
 
       if (!awaiting) {
         const response = await this.reason(messages, ctx);
-        // 没有工具调用 → 模型给出最终答案，循环结束
-        if (response.toolCalls.length === 0) return response.content;
+        if (routeAfterReason({ toolCallCount: response.toolCalls.length }) === "finish") {
+          return response.content;
+        }
+        // 首轮若在发起工具调用的同时给了计划文字，记下来当锚点（只认第一次）
+        if (this.settings.planMode) state = setPlan(state, parsePlan(response.content));
         awaiting = response.toolCalls;
       }
 
       const outcome = await this.act(awaiting, ctx, approvals);
       if (outcome.kind === "needs-approval") {
-        // 挂起：把现场与待批调用一起落盘，外部给出决定后再续跑
+        // 挂起：把现场、状态与待批调用一起落盘，外部给出决定后再续跑。
+        // 这一步优先于下面的取消判断：待批现场是攒出来的，不能因为此刻收到取消就丢掉
         await this.saveCheckpoint(messages, ctx, meta, {
           approvals,
           pending: outcome.call,
+          state,
         });
         throw new ApprovalRequiredError(
           `工具 ${outcome.call.name} 需要人工审批后才会执行`,
@@ -351,25 +380,91 @@ export class Agent {
           outcome.call,
         );
       }
-
       // 工具执行期间被取消 → 不再把结果回灌，直接结束
-      if (ctx.signal.aborted) {
-        throw new AgentCancelledError("Agent 已被取消");
-      }
+      if (ctx.signal.aborted) throw new AgentCancelledError("Agent 已被取消");
 
       await this.observe(messages, awaiting, outcome.resultById, ctx);
       await this.foldAndReport(messages, ctx, awaiting.length);
-      // 先记轮次再存档：存档里的 iterations 表示「已完成的轮数」，恢复时直接沿用
+
+      // 状态归并：本批的工具事实已进 ctx.tools，取尾部这一段并入状态（纯函数，见 state.ts）
+      state = recordToolResults(state, ctx.tools.slice(-awaiting.length));
+
+      // 先记步数再存档：存档里的 iterations 表示「已完成的步数」，恢复时直接沿用
       ctx.iterations++;
       // 存档必须在「消息序列完整」时写：assistant 的 tool_calls 与随后的 tool 结果都齐了
-      await this.saveCheckpoint(messages, ctx, meta, { approvals });
+      await this.saveCheckpoint(messages, ctx, meta, { approvals, state });
 
       awaiting = undefined;
     }
+  }
+
+  /**
+   * 收尾节点：步数用尽时不再直接抛错，而是给模型一次「用手头信息作答」的机会。
+   *
+   * 原来到上限就抛 AgentLimitError——跑了若干步、手里一堆中间结论，用户却只拿到一个报错。
+   * 现在补一次调用（明确不许再调工具）；连这次都给不出回答才抛错兜底。
+   * 这次调用照常计入 token 统计与轨迹，不隐藏成本。
+   */
+  private async wrapUp(
+    messages: Message[],
+    ctx: AgentContext,
+    state: RunState,
+    recalled: string[],
+  ): Promise<string> {
+    logger.info(`已达步数上限（${this.settings.maxIterations}），转入收尾作答`);
+    this.refreshSystemPrompt(messages, ctx, state, recalled);
+    messages.push({ role: "user", content: WRAP_UP_INSTRUCTION });
+
+    const response = await this.reason(messages, ctx);
+    const answer = response.content.trim();
+    if (answer) return answer;
 
     throw new AgentLimitError(
-      `已达到最大迭代次数 ${this.settings.maxIterations}，仍未得到最终答案`,
+      `已达到最大迭代次数 ${this.settings.maxIterations}，且模型未能给出收尾回答`,
     );
+  }
+
+  /**
+   * 每轮覆盖 system 消息的内容。
+   *
+   * 为什么值得每轮重算：循环内发生的事（进度、失败、新技能）原本对模型完全不可见——
+   * 系统提示词在 run 开头冻结，模型只能从工具输出里反推自己做到哪了。
+   * 代价是服务商的提示词前缀缓存会失效（多付一点输入费用），换来「模型始终知道当下状态」。
+   * 单机、每轮几百字符的量级，这笔交换是划算的。
+   */
+  private refreshSystemPrompt(
+    messages: Message[],
+    ctx: AgentContext,
+    state: RunState,
+    recalled: string[],
+  ): void {
+    const first = messages[0];
+    if (first?.role !== "system") return;
+    // 替换成新对象而不是原地改 content：FakeLLM/轨迹拿到的是消息数组的浅拷贝，
+    // 原地改会让「每一轮当时看到的 system 内容」都变成最后一次的值，无从核对。
+    messages[0] = { ...first, content: this.buildPrompt(ctx, state, recalled).text };
+  }
+
+  /** 组装系统提示词：技能目录、记忆摘要、召回片段、执行台账与当前进度都在这里注入 */
+  private buildPrompt(
+    ctx: AgentContext,
+    state: RunState,
+    recalled: string[],
+  ): ReturnType<PromptBuilder["build"]> {
+    return this.promptBuilder.build({
+      skills: this.skills?.catalog() ?? [],
+      memorySummary: this.memory?.currentSummary ?? "",
+      recalledMemory: recalled,
+      toolNames: this.registry.all().map((tool) => tool.name),
+      executionLedger: this.executionLedger,
+      progress: renderProgress({
+        step: ctx.iterations,
+        maxSteps: this.settings.maxIterations,
+        tools: ctx.tools,
+        state,
+      }),
+      planMode: this.settings.planMode,
+    });
   }
 
   /**
@@ -550,7 +645,8 @@ export class Agent {
     messages: Message[],
     ctx: AgentContext,
     meta: RunMeta,
-    state: { approvals: Record<string, boolean>; pending?: ToolCall },
+    // 参数刻意不叫 state：函数体里的 state 专指 RunState，两个名字混用容易读错
+    control: { approvals: Record<string, boolean>; pending?: ToolCall; state: RunState },
   ): Promise<void> {
     if (!this.settings.checkpointEnabled) return;
     try {
@@ -567,12 +663,14 @@ export class Agent {
         messages,
         promptVersions: meta.promptVersions,
         tools: [...ctx.tools],
-        approvals: state.approvals,
-        pendingApproval: state.pending
+        // 显式状态一并入档：续跑时不必再从工具列表反推计划与失败计数
+        state: control.state,
+        approvals: control.approvals,
+        pendingApproval: control.pending
           ? {
-              callId: state.pending.id,
-              tool: state.pending.name,
-              arguments: state.pending.arguments,
+              callId: control.pending.id,
+              tool: control.pending.name,
+              arguments: control.pending.arguments,
             }
           : undefined,
       });
@@ -582,6 +680,38 @@ export class Agent {
       logger.warning(`写入运行存档失败: ${reason}`);
     }
   }
+}
+
+/**
+ * 收尾指令（步数用尽时追加）。
+ *
+ * 措辞刻意不提「步数用尽」：这条消息会留在消息序列里（下一次提问时它是历史的一部分），
+ * 对用户而言它应该读起来像一次自然的追问，而不是一条系统报错。
+ */
+const WRAP_UP_INSTRUCTION =
+  "请基于目前已经获得的信息给出最终回答：说明确认了什么、哪些尚未验证、结论的适用范围。";
+
+/** 计划最多记几条、每条多少字：它是锚点而非全文，长了只会挤占上下文 */
+const MAX_PLAN_ITEMS = 5;
+const MAX_PLAN_ITEM_CHARS = 60;
+
+/**
+ * 从模型首轮的 content 里提取计划。
+ *
+ * 形态不固定（可能带序号、也可能是一句话），所以按换行/分号切开后逐条清洗，
+ * 不追求精确解析——它只是给后续轮次一个锚点。提取不到就返回 undefined，
+ * 不会为了「有东西可存」而编一条计划出来。
+ */
+function parsePlan(content: string): string[] | undefined {
+  const items = content
+    .split(/[\n；;]/)
+    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)、])\s*/, "").trim())
+    .filter(Boolean)
+    .slice(0, MAX_PLAN_ITEMS)
+    .map((line) =>
+      line.length > MAX_PLAN_ITEM_CHARS ? `${line.slice(0, MAX_PLAN_ITEM_CHARS)}…` : line,
+    );
+  return items.length > 0 ? items : undefined;
 }
 
 /** 折叠后的占位符：说明发生了什么 + 给出补救路径，而不是留一段空白让模型以为工具返回了空 */
