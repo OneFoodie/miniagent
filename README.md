@@ -7,7 +7,7 @@
 - **token 级流式** — SSE 增量逐字透出，tool_calls 分片按下标累积
 - **MCP 工具来源** — 配 `mcp.json` 即可把远端 MCP 服务端的工具接成内置工具（不配则不加载 SDK）
 - **持久化执行** — 每轮落运行存档；进程被杀可续跑，敏感工具可挂起等人工批准
-- **通用执行通道** — `powershell` 工具：取时间、看系统信息、跑 CLI，也能**写脚本直接执行**（node / python，单次超时可调）；带权限档位，默认只读白名单，可切 `full`
+- **通用执行通道** — `shell` 工具：取时间、看系统信息、跑 CLI，也能**写脚本直接执行**（node / python，单次超时可调）；Windows 走 PowerShell、Linux/macOS 走 bash；带权限档位，默认只读，可切 `full`
 - **技能（Skills）** — 技能 = 目录 + `SKILL.md`（元信息 + 操作指引），正文按需 `load_skill` 渐进式披露；模型可用 `create_skill` **自己写新技能并立即生效**
 - **上下文处理** — 滑窗 + 阈值摘要（指令类内容逐字保护）/ 工具结果超限时卸载到文件可回读 / 子 agent 隔离
 - **三层记忆** — token 滑窗 + 阈值摘要 / 生命周期长期记忆（置信度·矛盾消解·遗忘·巩固）/ 外部知识库（词面、语义或混合检索）
@@ -70,8 +70,9 @@ npm start                     # → http://localhost:3000
 | `MINIAGENT_TOOL_RESULT_MAX_CHARS` | `4000` | 工具结果内联上限；超限则卸载到 `workspace/offload/` 可回读，`0` 表示不限 |
 | `MINIAGENT_OFFLOAD_KEEP_RUNS` | `50` | 卸载产物保留多少个 run，更早的自动删除（`0` 表示不清理） |
 | `MINIAGENT_SUBAGENT_TIMEOUT` | `180` | 子 agent 单次执行上限（秒） |
-| `MINIAGENT_POWERSHELL_MODE` | `readonly` | 通用执行通道档位：`off` / `readonly`（只读白名单）/ `full` |
-| `MINIAGENT_POWERSHELL_TIMEOUT` | `30` | 单条 shell 命令的默认超时（秒）；单次可用 `timeout_seconds` 调大，full 档上限 300s |
+| `MINIAGENT_SHELL_MODE` | `readonly` | 通用执行通道档位：`off` / `readonly`（只读）/ `full`（旧名 `MINIAGENT_POWERSHELL_MODE` 仍可用） |
+| `MINIAGENT_SHELL_TIMEOUT` | `30` | 单条 shell 命令的默认超时（秒）；单次可用 `timeout_seconds` 调大，full 档上限 300s |
+| `MINIAGENT_SHELL_EXECUTABLE` | 空 | 覆盖可执行文件：Windows 默认 `powershell`、其它平台默认 `bash` |
 | `MINIAGENT_APPROVAL_TOOLS` | 空 | 需要人工审批的工具名（逗号分隔），命中即挂起等人批 |
 | `MINIAGENT_MCP_CONFIG` | `./mcp.json` | MCP 服务端配置；文件不存在则不加载 MCP SDK |
 | `MINIAGENT_SKILLS_DIR` | `./skills` | 技能包目录；模型可用 `create_skill` 往里写新技能 |
@@ -100,43 +101,61 @@ MINIAGENT_MODEL=my-finetune
 预设只提供**接入点与默认模型名**（`src/core/providers.ts`），不是一家一个适配器。
 配置错在启动时就报错：未知 provider 会列出候选，缺接入点/模型名会直说是哪个变量。
 
-## 通用执行通道（PowerShell）
+## 通用执行通道（shell）
 
-模型的知识里没有「现在」，也没有你机器上的任何状态。`powershell` 工具把本机 shell 交出去，覆盖
-「取当前时间（`Get-Date`）、看系统与进程信息、跑 git 等命令行工具、批量查看文件」这类需求——
+模型的知识里没有「现在」，也没有你机器上的任何状态。`shell` 工具把本机 shell 交出去，覆盖
+「取当前时间、看系统与进程信息、跑 git 等命令行工具、批量查看文件」这类需求——
 不值得为每一个都写一个专用工具。
+
+**它按平台选执行方式**：Windows 用 PowerShell（`powershell`），Linux / macOS 用系统自带的
+bash（`MINIAGENT_SHELL_EXECUTABLE` 可指定成 `sh` 等）。所以换环境部署不用额外装运行时。
 
 **它的性质与其余内置工具不同：没有沙箱。**
 
 | | 边界 |
 |---|---|
 | `read_file` / `write_file` | 路径锁在 `workspace` 之内，越界直接报错 |
-| `powershell` | 子进程权限 = server 进程权限，能读写 workspace 之外的任何路径 |
+| `shell` | 子进程权限 = server 进程权限，能读写 workspace 之外的任何路径 |
 
-所以用**权限档位**把风险显式化（`MINIAGENT_POWERSHELL_MODE`）：
+所以用**权限档位**把风险显式化（`MINIAGENT_SHELL_MODE`）：
 
 | 档位 | 行为 | 适用 |
 |---|---|---|
 | `off` | 不注册该工具 | 不放心的场景（最稳） |
-| **`readonly`（默认）** | 只放行白名单里的只读 cmdlet，且输入必须是**单条简单命令**（无管道、无连接符、无变量、无重定向） | 取时间、看系统信息 |
-| `full` | 不限制 | 需要真正跑脚本时；建议同时把 `powershell` 加进 `MINIAGENT_APPROVAL_TOOLS` |
+| **`readonly`（默认）** | 只放行只读命令，单条、不可写 | 取时间、看系统信息 |
+| `full` | 不限制 | 需要真正跑脚本时；建议同时把 `shell` 加进 `MINIAGENT_APPROVAL_TOOLS` |
 
-readonly 档的两条边界要说清楚，避免误判安全等级：
+`readonly` 在两个平台上的**实现不同，但边界一样**：
 
-- 它保证的是**「不写」**，不保证**「不读出沙箱外的东西」**——`Get-ChildItem C:\` 照样能列出沙箱外的目录；
-- 校验手段是「白名单命令名 + 拒绝元字符」，属于**防误用**，不是防对手的沙箱。真要防住有恶意的模型，
-  唯一可靠的做法是 `off`。
+| 平台 | 怎么实现的 | 写操作为什么不可能 |
+|---|---|---|
+| Windows | 元字符黑名单 + 只读 cmdlet 白名单 | 靠**拦**：`;`、`\|`、`>`、`$` 等一律拒绝 |
+| POSIX | **不把命令交给 shell**，拆成 argv 直接 `execFile` | 管道、重定向、变量、命令替换这些机制**根本不存在**（不是被拦，是没有） |
+
+两条边界要说清楚，避免误判安全等级：
+
+- 它保证的是**「不写」**，不保证**「不读出沙箱外的东西」**——`Get-ChildItem C:\`（Windows）或
+  `cat /etc/passwd`（POSIX）照样能读；
+- 它属于**防误用**，不是防对手的沙箱。真要防住有恶意的模型，唯一可靠的做法是 `off`。
+
+POSIX 的 `readonly` 还有个使用上的代价：**通配符不展开**——`ls *.txt` 会把字面量 `*.txt` 传给 `ls`。
+想用管道、重定向、通配符就切到 `full` 档。
 
 另外两处细节：子进程环境会**按名字剔除凭据类变量**（`KEY`/`TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`），
-否则 `Get-ChildItem env:` 就能把 API Key 读进对话和轨迹；输出上限 1 MB，超限中断并提示加筛选条件。
+否则把环境变量全打出来就能把 API Key 读进对话和轨迹；输出上限 1 MB，超限中断并提示加筛选条件。
 
-**写脚本 → 执行 → 看结果**：`write_file` 的沙箱根和 `powershell` 的工作目录都是 `workspace`，
+**写脚本 → 执行 → 看结果**：`write_file` 的沙箱根和 `shell` 的工作目录都是 `workspace`，
 所以这是一条现成链路——`write_file("scripts/x.py", ...)` 之后 `python scripts/x.py` 即可，
 相对路径天然落在工作区内。full 档下单次执行可以用 `timeout_seconds` 调大超时
-（默认取 `MINIAGENT_POWERSHELL_TIMEOUT`，上限是它与 300s 中的较大者），readonly 档不接受调大。
-Windows 上写 `python`（或 `py`）而不是 `python3`——后者常是应用商店的占位符，跑起来没有任何输出。
-这条工作法会写进系统提示词（仅在同时具备 `powershell` 与 `write_file` 时），所以循环、批量计算、
+（默认取 `MINIAGENT_SHELL_TIMEOUT`，上限是它与 300s 中的较大者），readonly 档不接受调大。
+解释器名字分平台：Windows 上写 `python`（或 `py`）而不是 `python3`（后者常是应用商店的占位符，
+跑起来没有任何输出），Linux 上反过来——那里叫 `python3`。
+这条工作法会写进系统提示词（仅在同时具备 `shell` 与 `write_file` 时），所以循环、批量计算、
 反复试错这类任务模型会自己去写脚本，不必硬凑工具调用。
+
+> 环境变量名从 `MINIAGENT_POWERSHELL_*` 改为 `MINIAGENT_SHELL_*`，旧名仍可读取（新名优先）。
+> 工具名从 `powershell` 改为 `shell`；`MINIAGENT_APPROVAL_TOOLS` 里若还写着 `powershell`，
+> 会被当作 `shell` 处理并在启动日志提示一次。
 
 ## 技能（Skills）
 
@@ -156,8 +175,8 @@ Windows 上写 `python`（或 `py`）而不是 `python3`——后者常是应用
 技能名同时是目录名：只允许字母或数字开头、由字母数字与 `. _ -` 组成（这是挡目录穿越的唯一防线）。
 同名技能会被覆盖，返回值里 `replaced: true` 会明说；技能目录跨会话长期生效，写错会一直影响后续所有会话。
 
-至于「自己执行」，两条路都靠 `powershell`：正文写清步骤、模型照着自己调工具走一遍（技能的本义），
-或技能里放 `scripts/*.ps1`、正文写明用 `powershell` 跑它。
+至于「自己执行」，两条路都靠 `shell`：正文写清步骤、模型照着自己调工具走一遍（技能的本义），
+或技能里放 `scripts/*`，正文写明用 `shell` 跑它。
 
 ## 断点续跑与人工审批
 
@@ -431,7 +450,7 @@ npx vitest run -u
 | 运行存档是单机文件 | `checkpoints/` 是本地路径，多实例共享未完成运行需要共享卷或另加后端 |
 | 指标跨实例靠 collector | 本进程的 `/metrics` 仍是进程内累计（重启清零）；跨实例聚合依赖 OTLP 推到 collector，项目自身不提供中心化存储 |
 | 并行子 agent 的 UI 配对是近似 | 前端按工具名配对 `tool_start` / `tool_end`，同名工具并发时可能配错显示位置（不影响轨迹文件与指标） |
-| powershell 的 readonly 是「防误用」 | 白名单命令名 + 拒绝元字符，能挡住绝大多数误操作与模型越界；但**不是对抗有恶意模型的沙箱**，也能读到 workspace 之外的路径。需要硬隔离就设 `MINIAGENT_POWERSHELL_MODE=off` |
+| shell 的 readonly 是「防误用」 | Windows 靠白名单命令名 + 拒绝元字符、POSIX 靠不经 shell 直执 argv，能挡住绝大多数误操作与模型越界；但**不是对抗有恶意模型的沙箱**，两边也都能读到 workspace 之外的路径。需要硬隔离就设 `MINIAGENT_SHELL_MODE=off` |
 | mermaid 需联网 | 流程图渲染按需从 jsdelivr 取 mermaid（页面本来也从 Google Fonts 取字体）；取不到时降级成「提示 + 源码」，不会静默丢内容。要彻底离线可用，就把它从 `app.js` 的 `loadMermaid` 里去掉，只用 ` ```svg ` |
 | 控制台有一条无害的 console 报错 | SSE 收到 `done` 后不再读响应体，浏览器记一条 `net::ERR_ABORTED`。代码里已显式容忍（[app.js](public/app.js) 的 `streamChat` catch 分支），不影响渲染；清掉它需要在 `done` 分支补 `reader.cancel()`，但那会触发服务端的连接关闭回调，收益不抵风险，故保留 |
 | 采样参数不可配 | 请求体不发 `temperature` / `top_p` / `max_tokens` / `stop`，随机性与输出长度上限全由服务商默认值决定 |

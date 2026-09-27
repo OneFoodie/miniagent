@@ -26,9 +26,9 @@ services:
       MINIAGENT_WORKSPACE: /app/workspace
       MINIAGENT_CHECKPOINT_DIR: /app/checkpoints
       MINIAGENT_MCP_CONFIG: /app/mcp.json
-      # 镜像基于 Debian slim，里面没有 PowerShell：默认关掉，免得模型拿到一个必然失败的工具
-      #   要在容器里用 shell 就先在 Dockerfile 里装 pwsh，再把这里改成 readonly / full
-      MINIAGENT_POWERSHELL_MODE: "off"
+      # 容器里有 bash，这条通道是可用的；默认仍然关掉——它是无沙箱的通用执行能力，
+      #   要不要给由使用者决定（要开就改成 readonly / full）
+      MINIAGENT_SHELL_MODE: "off"
       MINIAGENT_MEMORY_FILE: /app/memory/long_term.jsonl
       MINIAGENT_LIFECYCLE_MEMORY_FILE: /app/memory/lifecycle.jsonl
       MINIAGENT_EMBEDDING_LOCAL_MODEL_PATH: /app/models
