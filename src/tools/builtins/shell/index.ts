@@ -25,6 +25,7 @@ import { z } from "zod";
 import type { Settings } from "../../../core/config.js";
 import { defineTool } from "../../base.js";
 import type { ToolRegistry } from "../../registry.js";
+import { posixAdapter } from "./posix.js";
 import { powershellAdapter } from "./powershell.js";
 import type { ShellAdapter } from "./types.js";
 
@@ -47,7 +48,7 @@ const TIMEOUT_HEADROOM_SECONDS = 5;
  * 收平台参数而不是内部读 process.platform，测试才能直接构造两种适配器。
  */
 export function selectAdapter(platform: NodeJS.Platform): ShellAdapter {
-  return platform === "win32" ? powershellAdapter : powershellAdapter;
+  return platform === "win32" ? powershellAdapter : posixAdapter;
 }
 
 /**
