@@ -654,16 +654,21 @@ async function toggleConfigPanel() {
 }
 
 async function loadConfigPanel() {
+  let response;
   let data;
   try {
-    const response = await configRequest();
+    response = await configRequest();
     data = await response.json();
-    if (!response.ok) {
-      renderConfigAuthError(data.error ?? `HTTP ${response.status}`);
-      return;
-    }
   } catch {
-    renderConfigAuthError("加载失败：服务未响应");
+    renderConfigAuthError(0, "服务未响应");
+    return;
+  }
+  if (!response.ok) {
+    // 401 与 403 是两件完全不同的事，必须分开说：
+    //   401 = 服务端配了令牌，但浏览器这边没填/填错（最常见，用户只需要在下面填一次）
+    //   403 = 服务端根本没配 MINIAGENT_ADMIN_TOKEN，此时填什么都没用
+    // 早先把两者混成一句「服务端未配置…403」的提示，把 401 说成了 403，会让人去改服务器。
+    renderConfigAuthError(response.status, data.error);
     return;
   }
   configSchema = data.schema ?? [];
@@ -676,43 +681,86 @@ async function loadConfigPanel() {
   renderConfigPanel(data.values, data.readonlyModeNote ?? "");
 }
 
-/** 令牌没配 / 不对时，面板只剩一个令牌输入框 */
-function renderConfigAuthError(message) {
+/**
+ * 令牌相关的失败面板。
+ * @param status HTTP 状态码；0 表示请求根本没发出去（服务未响应）
+ * @param serverMessage 服务端返回的 error 字段
+ */
+function renderConfigAuthError(status, serverMessage) {
   configPanel.innerHTML = "";
+  const serverDisabled = status === 403;
+
   const notice = document.createElement("div");
   notice.className = "config-status error";
-  notice.textContent = message;
+  notice.textContent = serverDisabled
+    ? "服务端未配置 MINIAGENT_ADMIN_TOKEN，配置接口已禁用（403）。"
+    : status === 401
+      ? "需要管理令牌（401）：浏览器里还没有存，或存的值不对。"
+      : serverMessage || "加载失败";
+  configPanel.appendChild(notice);
+
+  if (serverDisabled) {
+    // 服务端没开这个接口，填令牌没有意义，只给「怎么在服务端开启」和「重新检查」
+    const how = document.createElement("div");
+    how.className = "config-hint";
+    how.style.marginLeft = "0";
+    how.textContent =
+      "在服务器部署目录的 .env 里加一行 MINIAGENT_ADMIN_TOKEN=<足够长的随机串>，" +
+      "重启服务（systemctl restart miniagent）后点下面的按钮。";
+    configPanel.appendChild(how);
+
+    const recheck = document.createElement("button");
+    recheck.type = "button";
+    recheck.className = "config-save";
+    recheck.textContent = "重新检查";
+    recheck.style.marginTop = "12px";
+    recheck.addEventListener("click", () => {
+      configPanel.textContent = "加载中…";
+      void loadConfigPanel();
+    });
+    configPanel.appendChild(recheck);
+    return;
+  }
 
   const row = document.createElement("div");
   row.className = "config-field";
   const label = document.createElement("label");
+  label.setAttribute("for", "configToken");
   label.textContent = "管理令牌";
   const tokenInput = document.createElement("input");
   tokenInput.type = "password";
   tokenInput.id = "configToken";
   tokenInput.value = adminToken();
   tokenInput.placeholder = "与服务端 MINIAGENT_ADMIN_TOKEN 一致";
-
   row.append(label, tokenInput);
+  configPanel.appendChild(row);
 
   const actions = document.createElement("div");
   actions.className = "config-actions";
   const retry = document.createElement("button");
   retry.type = "button";
   retry.className = "config-save";
-  retry.textContent = "重试";
-  retry.addEventListener("click", () => {
+  retry.textContent = "保存令牌并重试";
+  const submit = () => {
     localStorage.setItem(ADMIN_TOKEN_KEY, tokenInput.value.trim());
     configPanel.textContent = "加载中…";
     void loadConfigPanel();
-  });
+  };
+  retry.addEventListener("click", submit);
   actions.appendChild(retry);
+  configPanel.appendChild(actions);
 
   const hint = document.createElement("div");
   hint.className = "config-hint";
   hint.style.marginLeft = "0";
-  hint.textContent = "服务端未配置 MINIAGENT_ADMIN_TOKEN 时，配置接口一律禁用（403）。";
-  configPanel.append(notice, row, actions, hint);
+  hint.textContent = "令牌只存在本机浏览器（localStorage），不会发给第三方；填一次之后就不用再填。";
+  configPanel.appendChild(hint);
+
+  // 输入后直接回车提交，省掉一次点击
+  tokenInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submit();
+  });
+  tokenInput.focus();
 }
 
 function renderConfigPanel(values, readonlyModeNote) {
@@ -934,6 +982,16 @@ function closeConfigPanel() {
 }
 
 configBtn.addEventListener("click", () => void toggleConfigPanel());
+
+/**
+ * 拦掉面板内部的点击，不让它冒泡到 document 的「点击外部收起」监听。
+ *
+ * 不加这行会有一个很隐蔽的 bug（已实测）：面板里有些按钮在处理函数里**同步**替换
+ * configPanel.innerHTML（如「保存令牌并重试」先显示"加载中…"），按钮在事件冒泡到
+ * document 之前就已经从 DOM 上摘掉了；此时 configWrap.contains(event.target) 变成
+ * false，于是被误判为「点了面板外面」，面板刚点完就自动收起。
+ */
+configWrap.addEventListener("click", (event) => event.stopPropagation());
 
 /** 当天只显示时分，更早的显示月日 */
 function formatTime(seconds) {
