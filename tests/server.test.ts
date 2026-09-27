@@ -6,7 +6,7 @@
  */
 
 import { createServer, type Server } from "node:http";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -109,6 +109,9 @@ beforeEach(async () => {
     traceDir: join(tempDir, "traces"),
     historyDir: join(tempDir, "history"),
     workspace: join(tempDir, "workspace"),
+    // 配置接口写盘的目标：指向临时目录，绝不碰开发者真实 .env
+    envFile: join(tempDir, ".env"),
+    adminToken: "test-admin-token",
   };
 
   const registry = new ToolRegistry();
@@ -575,5 +578,116 @@ describe("方法与路由兜底", () => {
   it("不支持的方法返回 405", async () => {
     expect((await fetch(`${baseUrl}/health`, { method: "PUT" })).status).toBe(405);
     expect((await fetch(`${baseUrl}/api/unknown`, { method: "POST" })).status).toBe(405);
+  });
+});
+
+describe("配置接口", () => {
+  const TOKEN = "test-admin-token";
+
+  function getConfig(token?: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/config`, {
+      headers: token ? { "X-Admin-Token": token } : {},
+    });
+  }
+
+  function putConfig(body: unknown, token?: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/config`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "X-Admin-Token": token } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("未配置管理令牌时一律 403", async () => {
+    deps.settings.adminToken = "";
+    expect((await getConfig(TOKEN)).status).toBe(403);
+    expect((await putConfig({ values: {} }, TOKEN)).status).toBe(403);
+  });
+
+  it("令牌缺失或错误时 401", async () => {
+    expect((await getConfig()).status).toBe(401);
+    expect((await getConfig("wrong")).status).toBe(401);
+    expect((await putConfig({ values: {} }, "wrong")).status).toBe(401);
+  });
+
+  it("GET 下发 schema 与当前值，且不含 API Key 明文", async () => {
+    const response = await getConfig(TOKEN);
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as {
+      schema: Array<{ key: string; env: string }>;
+      values: Record<string, unknown>;
+      readonlyModeNote: string;
+    };
+    expect(data.schema.map((field) => field.key)).toContain("powershellMode");
+    expect(data.values.model).toBe(deps.settings.model);
+    expect(data.values.apiKeySet).toBe(true);
+    expect(JSON.stringify(data)).not.toContain("test-key");
+  });
+
+  it("readonly 档下给出灰字说明，full 档下为空", async () => {
+    deps.settings.powershellMode = "readonly";
+    const note = (await (await getConfig(TOKEN)).json()) as { readonlyModeNote: string };
+    expect(note.readonlyModeNote).toContain("readonly");
+
+    deps.settings.powershellMode = "full";
+    const full = (await (await getConfig(TOKEN)).json()) as { readonlyModeNote: string };
+    expect(full.readonlyModeNote).toBe("");
+  });
+
+  it("PUT 改配置：写回 .env、原地改 settings、立即生效", async () => {
+    const response = await putConfig(
+      { values: { maxIterations: 12, model: "new-model" } },
+      TOKEN,
+    );
+    expect(response.status).toBe(200);
+    const data = (await response.json()) as { ok: boolean; applied: string[] };
+    expect(data.ok).toBe(true);
+    expect(data.applied.sort()).toEqual(["maxIterations", "model"]);
+
+    expect(deps.settings.maxIterations).toBe(12);
+    expect(deps.settings.model).toBe("new-model");
+
+    const env = await readFile(deps.settings.envFile, "utf-8");
+    expect(env).toContain("MINIAGENT_MAX_ITERATIONS=12\n");
+    expect(env).toContain("MINIAGENT_MODEL=new-model\n");
+  });
+
+  it("PUT 改 powershellMode 后工具表立即变化", async () => {
+    expect(deps.registry.has("powershell")).toBe(false);
+
+    const on = await putConfig({ values: { powershellMode: "full" } }, TOKEN);
+    expect(on.status).toBe(200);
+    expect(deps.settings.powershellMode).toBe("full");
+    expect(deps.registry.has("powershell")).toBe(true);
+
+    const off = await putConfig({ values: { powershellMode: "off" } }, TOKEN);
+    expect(off.status).toBe(200);
+    expect(deps.registry.has("powershell")).toBe(false);
+  });
+
+  it("校验失败返回 400，且 .env 与 settings 都不变", async () => {
+    const before = deps.settings.powershellMode;
+    const response = await putConfig({ values: { powershellMode: "read-only" } }, TOKEN);
+    expect(response.status).toBe(400);
+    const data = (await response.json()) as { errors: Array<{ key: string }> };
+    expect(data.errors[0]!.key).toBe("powershellMode");
+    expect(deps.settings.powershellMode).toBe(before);
+
+    const env = await readFile(deps.settings.envFile, "utf-8").catch(() => "");
+    expect(env).not.toContain("MINIAGENT_POWERSHELL_MODE");
+  });
+
+  it("secret 留空表示保持原值，填了才覆盖", async () => {
+    const before = deps.settings.apiKey;
+    await putConfig({ values: { apiKey: "" } }, TOKEN);
+    expect(deps.settings.apiKey).toBe(before);
+
+    await putConfig({ values: { apiKey: "sk-new-key-value" } }, TOKEN);
+    expect(deps.settings.apiKey).toBe("sk-new-key-value");
+    const env = await readFile(deps.settings.envFile, "utf-8");
+    expect(env).toContain("MINIAGENT_API_KEY=sk-new-key-value\n");
   });
 });

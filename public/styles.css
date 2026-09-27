@@ -989,6 +989,125 @@ body::after {
   text-align: center;
 }
 
+/* ---------------- 配置菜单 ---------------- */
+
+.config-wrap {
+  position: relative;
+}
+
+.config-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 21;
+  width: 430px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.config-panel h3 {
+  margin: 16px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.config-panel h3:first-child {
+  margin-top: 0;
+}
+
+.config-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+}
+
+.config-field > label {
+  flex: 0 0 132px;
+  color: var(--ink-soft);
+}
+
+.config-field input[type="text"],
+.config-field input[type="password"],
+.config-field input[type="number"] {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.config-field input:focus {
+  outline: none;
+  border-color: var(--line-strong);
+}
+
+.config-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-hint {
+  margin: 2px 0 6px 142px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.config-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.config-save {
+  padding: 7px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 100px;
+  background: var(--bg-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.config-save:hover:not(:disabled) {
+  border-color: rgba(232, 163, 61, 0.5);
+}
+
+.config-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.config-status {
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.config-status.error {
+  color: var(--rust);
+}
+
+.config-status.ok {
+  color: #8fbf7f;
+}
+
 /* ---------------- 响应式 ---------------- */
 
 @media (max-width: 640px) {
@@ -1000,4 +1119,7 @@ body::after {
   .dock-wrap { padding-left: 18px; padding-right: 18px; }
   .msg-user { max-width: 92%; }
   .step-args { max-width: 160px; }
+  .config-panel { width: calc(100vw - 36px); }
+  .config-field > label { flex: 0 0 96px; }
+  .config-hint { margin-left: 106px; }
 }

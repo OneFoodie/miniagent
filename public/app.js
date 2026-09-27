@@ -18,6 +18,9 @@ const historyWrap = document.querySelector(".history-wrap");
 const historyBtn = document.querySelector("#historyBtn");
 const historyPanel = document.querySelector("#historyPanel");
 const newChatBtn = document.querySelector("#newChatBtn");
+const configWrap = document.querySelector(".config-wrap");
+const configBtn = document.querySelector("#configBtn");
+const configPanel = document.querySelector("#configPanel");
 
 /** 单条输入/输出展示的最大字符数，超出则截断（完整内容见原始轨迹） */
 const MAX_IO_CHARS = 20000;
@@ -73,13 +76,18 @@ async function doStop(runId) {
   }
 }
 
-// 获取后端模型名（接口返回 /health）
-fetch("/health")
-  .then((r) => r.json())
-  .then((data) => {
+// 获取后端模型名（接口返回 /health）；配置菜单改完模型后也用它刷新徽标
+async function refreshModelBadge() {
+  try {
+    const response = await fetch("/health");
+    const data = await response.json();
     if (data.model) modelName.textContent = data.model;
-  })
-  .catch(() => {});
+  } catch {
+    // 后端没起来时保持默认文案
+  }
+}
+
+void refreshModelBadge();
 
 /* ---------------- 输入交互 ---------------- */
 
@@ -598,6 +606,335 @@ function closeHistoryPanel() {
   historyBtn.setAttribute("aria-expanded", "false");
 }
 
+/* ---------------- 配置菜单 ---------------- */
+
+const ADMIN_TOKEN_KEY = "miniagent.adminToken";
+
+/**
+ * 打开面板时服务端值 + 开关折算值的快照。
+ * 只提交与它不同的项：否则「打开看一眼再点保存」会把 readonly 位置上的
+ * 开关（显示为「关」）当成 off 提交，静默砍掉只读白名单。
+ */
+let configBaseline = null;
+let configSchema = [];
+
+const GROUP_LABELS = {
+  model: "模型",
+  runtime: "运行",
+  sandbox: "执行权限（沙盒）",
+  files: "文件边界",
+  approval: "人工审批",
+};
+
+function adminToken() {
+  return localStorage.getItem(ADMIN_TOKEN_KEY) ?? "";
+}
+
+/** 开关口径：开 = full，关 = off；readonly 也折算为「关」 */
+function switchState(mode) {
+  return mode === "full" ? "full" : "off";
+}
+
+function configRequest(init) {
+  return fetch("/api/config", {
+    ...init,
+    headers: { "X-Admin-Token": adminToken(), ...(init?.headers ?? {}) },
+  });
+}
+
+async function toggleConfigPanel() {
+  if (!configPanel.hidden) {
+    closeConfigPanel();
+    return;
+  }
+  configPanel.hidden = false;
+  configBtn.setAttribute("aria-expanded", "true");
+  configPanel.textContent = "加载中…";
+  await loadConfigPanel();
+}
+
+async function loadConfigPanel() {
+  let data;
+  try {
+    const response = await configRequest();
+    data = await response.json();
+    if (!response.ok) {
+      renderConfigAuthError(data.error ?? `HTTP ${response.status}`);
+      return;
+    }
+  } catch {
+    renderConfigAuthError("加载失败：服务未响应");
+    return;
+  }
+  configSchema = data.schema ?? [];
+  configBaseline = { ...data.values };
+  for (const field of configSchema) {
+    if (field.type === "powershellMode") {
+      configBaseline[field.key] = switchState(data.values[field.key]);
+    }
+  }
+  renderConfigPanel(data.values, data.readonlyModeNote ?? "");
+}
+
+/** 令牌没配 / 不对时，面板只剩一个令牌输入框 */
+function renderConfigAuthError(message) {
+  configPanel.innerHTML = "";
+  const notice = document.createElement("div");
+  notice.className = "config-status error";
+  notice.textContent = message;
+
+  const row = document.createElement("div");
+  row.className = "config-field";
+  const label = document.createElement("label");
+  label.textContent = "管理令牌";
+  const tokenInput = document.createElement("input");
+  tokenInput.type = "password";
+  tokenInput.id = "configToken";
+  tokenInput.value = adminToken();
+  tokenInput.placeholder = "与服务端 MINIAGENT_ADMIN_TOKEN 一致";
+
+  row.append(label, tokenInput);
+
+  const actions = document.createElement("div");
+  actions.className = "config-actions";
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "config-save";
+  retry.textContent = "重试";
+  retry.addEventListener("click", () => {
+    localStorage.setItem(ADMIN_TOKEN_KEY, tokenInput.value.trim());
+    configPanel.textContent = "加载中…";
+    void loadConfigPanel();
+  });
+  actions.appendChild(retry);
+
+  const hint = document.createElement("div");
+  hint.className = "config-hint";
+  hint.style.marginLeft = "0";
+  hint.textContent = "服务端未配置 MINIAGENT_ADMIN_TOKEN 时，配置接口一律禁用（403）。";
+  configPanel.append(notice, row, actions, hint);
+}
+
+function renderConfigPanel(values, readonlyModeNote) {
+  configPanel.innerHTML = "";
+  const groups = new Map();
+  for (const field of configSchema) {
+    if (!groups.has(field.group)) groups.set(field.group, []);
+    groups.get(field.group).push(field);
+  }
+  for (const [group, fields] of groups) {
+    const title = document.createElement("h3");
+    title.textContent = GROUP_LABELS[group] ?? group;
+    configPanel.appendChild(title);
+    for (const field of fields) {
+      configPanel.appendChild(makeConfigRow(field, values, readonlyModeNote));
+    }
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "config-actions";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "config-save";
+  save.textContent = "保存并生效";
+  save.addEventListener("click", () => void saveConfig(save));
+  const status = document.createElement("span");
+  status.className = "config-status";
+  status.id = "configStatus";
+  actions.append(save, status);
+  configPanel.appendChild(actions);
+
+  const tokenRow = document.createElement("div");
+  tokenRow.className = "config-field";
+  const tokenLabel = document.createElement("label");
+  tokenLabel.textContent = "管理令牌";
+  const tokenInput = document.createElement("input");
+  tokenInput.type = "password";
+  tokenInput.id = "configToken";
+  tokenInput.value = adminToken();
+  tokenInput.addEventListener("change", () => {
+    localStorage.setItem(ADMIN_TOKEN_KEY, tokenInput.value.trim());
+  });
+  tokenRow.append(tokenLabel, tokenInput);
+  configPanel.appendChild(tokenRow);
+}
+
+function makeConfigRow(field, values, readonlyModeNote) {
+  const name = `config-${field.key}`;
+
+  // 沙盒开关：二值开关表达不了 readonly，所以勾选与否只看是否 full
+  if (field.type === "powershellMode") {
+    const container = document.createElement("div");
+
+    const row = document.createElement("div");
+    row.className = "config-field";
+    const label = document.createElement("label");
+    label.setAttribute("for", name);
+    label.textContent = field.label;
+    const box = document.createElement("div");
+    box.className = "config-switch";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = name;
+    input.dataset.key = field.key;
+    input.checked = values[field.key] === "full";
+    const stateText = document.createElement("span");
+    stateText.textContent = input.checked ? "开（full）" : "关（off）";
+    input.addEventListener("change", () => {
+      stateText.textContent = input.checked ? "开（full）" : "关（off）";
+    });
+    box.append(input, stateText);
+    row.append(label, box);
+    container.appendChild(row);
+
+    const note = readonlyModeNote || field.description || "";
+    if (note) {
+      const hint = document.createElement("div");
+      hint.className = "config-hint";
+      hint.textContent = note;
+      container.appendChild(hint);
+    }
+    return container;
+  }
+
+  const row = document.createElement("div");
+  row.className = "config-field";
+  const label = document.createElement("label");
+  label.setAttribute("for", name);
+  label.textContent = field.label;
+  row.appendChild(label);
+
+  let input;
+  if (field.type === "boolean") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(values[field.key]);
+  } else if (field.type === "number") {
+    input = document.createElement("input");
+    input.type = "number";
+    input.value = String(values[field.key] ?? "");
+    if (field.min !== undefined) input.min = String(field.min);
+    if (field.max !== undefined) input.max = String(field.max);
+  } else if (field.type === "secret") {
+    input = document.createElement("input");
+    input.type = "password";
+    input.value = "";
+    input.placeholder = values.apiKeySet ? `已配置（${values.apiKeyMask}）· 留空不改` : "未配置";
+  } else {
+    input = document.createElement("input");
+    input.type = "text";
+    input.value = Array.isArray(values[field.key])
+      ? values[field.key].join(",")
+      : String(values[field.key] ?? "");
+  }
+  input.id = name;
+  input.dataset.key = field.key;
+  row.appendChild(input);
+
+  if (!field.description) return row;
+  const container = document.createElement("div");
+  const hint = document.createElement("div");
+  hint.className = "config-hint";
+  hint.textContent = field.description;
+  container.append(row, hint);
+  return container;
+}
+
+/** 收集与初值不同的项；空对象表示没有可提交的变更 */
+function collectConfigChanges() {
+  const values = {};
+  for (const field of configSchema) {
+    const input = configPanel.querySelector(`#config-${field.key}`);
+    if (!input) continue;
+
+    if (field.type === "powershellMode") {
+      const next = input.checked ? "full" : "off";
+      if (next !== configBaseline[field.key]) values[field.key] = next;
+      continue;
+    }
+    // secret 留空 = 保持原值
+    if (field.type === "secret") {
+      if (input.value.trim() !== "") values[field.key] = input.value.trim();
+      continue;
+    }
+
+    let next;
+    if (field.type === "boolean") {
+      next = input.checked;
+    } else if (field.type === "number") {
+      if (input.value.trim() === "") continue;
+      next = Number(input.value);
+    } else if (field.type === "list") {
+      next = input.value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    } else {
+      next = input.value.trim();
+      if (next === "") continue;
+    }
+
+    const base = configBaseline[field.key];
+    const same = Array.isArray(next)
+      ? next.join(",") === (Array.isArray(base) ? base.join(",") : "")
+      : next === base;
+    if (!same) values[field.key] = next;
+  }
+  return values;
+}
+
+async function saveConfig(button) {
+  const status = configPanel.querySelector("#configStatus");
+  const values = collectConfigChanges();
+  if (Object.keys(values).length === 0) {
+    status.className = "config-status";
+    status.textContent = "没有改动";
+    return;
+  }
+  button.disabled = true;
+  status.className = "config-status";
+  status.textContent = "保存中…";
+  try {
+    const response = await configRequest({
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      const detail = (data.errors ?? []).map((item) => `${item.key}: ${item.message}`).join("；");
+      status.className = "config-status error";
+      status.textContent = detail || data.error || `HTTP ${response.status}`;
+      return;
+    }
+    const applied = data.applied ?? [];
+    status.className = "config-status ok";
+    status.textContent = applied.length > 0 ? `已生效：${applied.join("、")}` : "没有改动";
+    // 重新拉一次，让掩码与开关回到服务端的真实状态
+    await loadConfigPanel();
+    const fresh = configPanel.querySelector("#configStatus");
+    if (fresh) {
+      fresh.className = "config-status ok";
+      fresh.textContent = applied.length > 0 ? `已生效：${applied.join("、")}` : "没有改动";
+    }
+    if (applied.includes("model")) {
+      void refreshModelBadge();
+    }
+  } catch (error) {
+    status.className = "config-status error";
+    status.textContent = `保存失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function closeConfigPanel() {
+  configPanel.hidden = true;
+  configBtn.setAttribute("aria-expanded", "false");
+}
+
+configBtn.addEventListener("click", () => void toggleConfigPanel());
+
 /** 当天只显示时分，更早的显示月日 */
 function formatTime(seconds) {
   const date = new Date(seconds * 1000);
@@ -612,6 +949,9 @@ newChatBtn.addEventListener("click", () => startNewChat());
 
 // 点击面板外部时收起
 document.addEventListener("click", (event) => {
+  if (!configPanel.hidden && configWrap && !configWrap.contains(event.target)) {
+    closeConfigPanel();
+  }
   if (historyPanel.hidden) return;
   if (historyWrap && historyWrap.contains(event.target)) return;
   closeHistoryPanel();

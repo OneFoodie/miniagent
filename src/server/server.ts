@@ -13,7 +13,7 @@
  * 避免多个用户并发时事件互相串台（registry/llm 可安全复用）。
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -24,6 +24,14 @@ import { Agent } from "../agent/agent.js";
 import { listCheckpoints, loadCheckpoint, recordApproval } from "../agent/checkpoint.js";
 import { AgentContext } from "../agent/context.js";
 import { loadSettings, type Settings } from "../core/config.js";
+import {
+  applyConfigValues,
+  CONFIG_FIELDS,
+  normalizeConfigValues,
+  readConfigValues,
+  toEnvText,
+} from "../core/configSchema.js";
+import { updateEnvFile } from "../core/envFile.js";
 import { ApprovalRequiredError, MiniAgentError } from "../core/errors.js";
 import { EventBus, EventType, makeEvent } from "../core/events.js";
 import { getLogger, setupLogging } from "../core/logging.js";
@@ -59,7 +67,7 @@ import {
 } from "../observability/otel.js";
 import { Tracer } from "../observability/tracer.js";
 import { registerSkillTools, SkillRegistry } from "../skills/index.js";
-import { registerBuiltins } from "../tools/builtins/index.js";
+import { registerBuiltins, reapplyTools } from "../tools/builtins/index.js";
 import { describePowershell } from "../tools/builtins/powershell.js";
 import {
   childRegistryOf,
@@ -182,6 +190,123 @@ function writeSSE(response: ServerResponse, event: string, data: unknown): void 
   } catch {
     // 客户端已断开，写入失败是正常现象
   }
+}
+
+/** 管理令牌校验结果 */
+type AdminAuth = { ok: true } | { ok: false; status: number; error: string };
+
+/**
+ * 配置接口的鉴权。
+ *
+ * 为什么必须鉴权：这个接口能写 .env 并把 powershellMode 切成 full —— 等于把本机执行权
+ * 交给任何能访问到 HTTP 端口的人。而 README 里的在线演示实例是公网且无鉴权的。
+ * 未配置令牌时直接 403（即关闭接口），而不是「不校验就放行」。
+ */
+function checkAdminAuth(request: IncomingMessage, settings: Settings): AdminAuth {
+  const expected = settings.adminToken;
+  if (!expected) {
+    return { ok: false, status: 403, error: "未配置 MINIAGENT_ADMIN_TOKEN，配置接口已禁用" };
+  }
+  const header = request.headers["x-admin-token"];
+  const provided = Array.isArray(header) ? header[0] : header;
+  if (typeof provided !== "string" || provided === "") {
+    return { ok: false, status: 401, error: "缺少 X-Admin-Token 请求头" };
+  }
+  const a = Buffer.from(provided, "utf-8");
+  const b = Buffer.from(expected, "utf-8");
+  // timingSafeEqual 要求等长，长度不同直接判否（长度本身不是秘密）
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
+    return { ok: false, status: 401, error: "管理令牌不匹配" };
+  }
+  return { ok: true };
+}
+
+/** GET /api/config：下发字段元数据 + 当前值（不含任何密钥明文） */
+function handleConfigRead(response: ServerResponse, settings: Settings): void {
+  response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(
+    JSON.stringify({
+      schema: CONFIG_FIELDS,
+      values: readConfigValues(settings),
+      // readonly 是二值开关表达不了的第三态：开关显示为关，旁边用这句说明
+      readonlyModeNote:
+        settings.powershellMode === "readonly"
+          ? "当前为 readonly（只读白名单，非开关状态）；保存开关会把它覆盖为 off 或 full"
+          : "",
+    }),
+  );
+}
+
+/**
+ * PUT /api/config：校验 → 写 .env → 原地改 settings → 重注册受影响工具。
+ *
+ * 顺序不能换：校验在最前（失败则内存与磁盘都不动），写盘在改内存之前
+ * （写盘失败时内存仍是旧的；反过来会留下「本次运行是新配置、重启后是旧配置」的错位）。
+ */
+async function handleConfigWrite(
+  request: IncomingMessage,
+  response: ServerResponse,
+  settings: Settings,
+  registry: ToolRegistry,
+): Promise<void> {
+  const json = (status: number, payload: unknown): void => {
+    response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify(payload));
+  };
+
+  let parsed: { values?: unknown };
+  try {
+    parsed = JSON.parse(await readRawBody(request)) as { values?: unknown };
+  } catch {
+    json(400, { errors: [{ key: "", message: "请求体不是合法 JSON" }] });
+    return;
+  }
+  const raw = parsed.values;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    json(400, { errors: [{ key: "values", message: "需要 values 对象" }] });
+    return;
+  }
+
+  const result = normalizeConfigValues(raw as Record<string, unknown>);
+  if (!result.ok) {
+    json(400, { errors: result.errors });
+    return;
+  }
+
+  // 写 .env：只写本次提交的项，其余行（含注释）原样保留
+  const updates: Record<string, string> = {};
+  for (const field of CONFIG_FIELDS) {
+    if (field.key in result.normalized) {
+      updates[field.env] = toEnvText(result.normalized[field.key]!);
+    }
+  }
+  try {
+    if (Object.keys(updates).length > 0) {
+      await updateEnvFile(settings.envFile, updates);
+    }
+  } catch (error) {
+    json(500, {
+      errors: [
+        {
+          key: "envFile",
+          message: `写入 ${settings.envFile} 失败: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        },
+      ],
+    });
+    return;
+  }
+
+  const changed = applyConfigValues(settings, result.normalized);
+  await reapplyTools(registry, settings, changed);
+
+  json(200, {
+    ok: true,
+    applied: changed,
+    // 可编辑项都是即时生效的；留这个字段是为了让前端不必硬编码这个结论
+    restartRequired: [] as string[],
+  });
 }
 
 /** 会话历史接口：GET /api/sessions 列表、GET /api/sessions/:id 详情、DELETE 删除 */
@@ -668,6 +793,26 @@ export function createRequestHandler(deps: ServerDeps) {
     // settings 原先取自 main 的局部变量，抽出来后从 deps 取
     const { settings } = deps;
     const urlPath = (request.url ?? "/").split("?")[0]!;
+    // 配置菜单：读写当前配置。能改执行档位，所以必须先过管理令牌
+    if (urlPath === "/api/config" && (request.method === "GET" || request.method === "PUT")) {
+      const auth = checkAdminAuth(request, settings);
+      if (!auth.ok) {
+        response.writeHead(auth.status, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ error: auth.error }));
+        return;
+      }
+      if (request.method === "GET") {
+        handleConfigRead(response, settings);
+        return;
+      }
+      handleConfigWrite(request, response, settings, deps.registry).catch((error: unknown) => {
+        response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(
+          JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+        );
+      });
+      return;
+    }
     if (request.method === "POST" && urlPath === "/api/stop") {
       // 停止指定运行：读取 run_id → 找到上下文 → 触发取消
       readRawBody(request)

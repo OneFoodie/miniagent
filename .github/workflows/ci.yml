@@ -37,3 +37,98 @@ jobs:
           MINIAGENT_DEEPSEEK_API_KEY: test-key
           # 让 vitest 不写新快照：快照漂移应当显式 `npx vitest run -u` 后提交
           CI: "true"
+
+  # 编译产物只有完整环境能产出：轻量环境缺 optional 依赖（vector.ts 的类型导入），
+  # tsc 会报 TS2307。所以服务器不编译，只接收这里产出的 dist/。
+  build:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安装依赖（含 optional，保证类型齐全）
+        run: npm ci
+        env:
+          # 构建期不需要真实 Key，但 loadSettings 会在 import 时校验配置
+          MINIAGENT_DEEPSEEK_API_KEY: build-key
+
+      - name: 编译
+        run: npm run build
+        env:
+          MINIAGENT_DEEPSEEK_API_KEY: build-key
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Secrets 未配置时整体跳过，不阻塞主干 CI。
+    # （step 级的 if 里读不到 secrets，所以这个判断只能放在 job 上。）
+    if: >
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      secrets.SSH_HOST != '' && secrets.SSH_PRIVATE_KEY != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: 准备 SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # 首次连接先写入 known_hosts，否则 ssh 会停在交互式确认
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: 同步代码与编译产物
+        env:
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          TARGET="$SSH_USER@$SSH_HOST:$DEPLOY_PATH"
+          # 刻意不加 --delete：服务器上的 .env / knowledge / memory / history 等运行时
+          # 数据必须留着。代价是远端 dist/ 可能残留已删除源文件对应的旧 .js，
+          # 本规模下可接受，需要时手动清理。
+          EXCLUDES=(
+            --exclude .env --exclude node_modules/ --exclude knowledge/
+            --exclude memory/ --exclude history/ --exclude traces/
+            --exclude workspace/ --exclude vector-db/ --exclude checkpoints/
+            --exclude .cache/ --exclude models/
+          )
+          rsync -az --no-perms --omit-dir-times -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT" \
+            "${EXCLUDES[@]}" public/ skills/ package.json package-lock.json "$TARGET/"
+          rsync -az --no-perms --omit-dir-times -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT" \
+            "${EXCLUDES[@]}" dist/ "$TARGET/dist/"
+
+      - name: 安装运行依赖并重启服务
+        env:
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SERVICE_NAME: ${{ secrets.SERVICE_NAME || 'miniagent' }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_PATH' && \
+             npm ci --omit=dev --omit=optional --no-audit --no-fund && \
+             sudo systemctl restart '$SERVICE_NAME'"
