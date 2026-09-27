@@ -11,19 +11,25 @@ dist/
 npm-debug.log*
 
 # 测试与运行产物
+#
+# 这里每个目录名都必须以 / 开头（锚定到仓库根）。原因是一次真实事故：
+# 写成 `memory/` 时它会匹配任意层级的同名目录，把 `src/memory/`（9 个源文件）
+# 和 `src/history/` 一起忽略掉，于是 GitHub 上的仓库缺文件、CI 类型检查
+# 报一堆 TS2307「Cannot find module '../memory/base.js'」——而本地因为文件还在，
+# 完全看不出问题。加 / 之后只忽略根目录下的运行时数据目录。
 coverage/
-workspace/
-traces/
-eval_reports/
-history/
-memory/
+/workspace/
+/traces/
+/eval_reports/
+/history/
+/memory/
 # 运行存档：只留中断/挂起的运行，属于本机产物
-checkpoints/
+/checkpoints/
 
 # 向量知识库：索引文件 + 模型缓存 + 模型本体（体积大，用 npm run model:fetch 重建）
-vector-db/
-.cache/
-models/
+/vector-db/
+/.cache/
+/models/
 
 # Python 残留（项目最初按 Python 规划，已改为 TypeScript）
 __pycache__/

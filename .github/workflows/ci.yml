@@ -73,11 +73,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    # Secrets 未配置时整体跳过，不阻塞主干 CI。
-    # （step 级的 if 里读不到 secrets，所以这个判断只能放在 job 上。）
-    if: >
-      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      secrets.SSH_HOST != '' && secrets.SSH_PRIVATE_KEY != ''
+    # 注意：job 级的 if **不能**引用 secrets 上下文（GitHub 会在派发前就判工作流文件非法，
+    # 整个 run 以 0 秒失败、报 "workflow file issue"——已实测踩到）。
+    # 所以「Secrets 没配就跳过」的判断放在第一个 step 里，用它的 output 控制后续步骤。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
@@ -86,7 +85,21 @@ jobs:
           name: dist
           path: dist
 
+      - name: 检查部署凭据是否已配置
+        id: guard
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "::notice::未配置 SSH_HOST / SSH_PRIVATE_KEY，跳过部署（主干 CI 不受影响）"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 准备 SSH
+        if: steps.guard.outputs.ready == 'true'
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
@@ -99,6 +112,7 @@ jobs:
           ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: 同步代码与编译产物
+        if: steps.guard.outputs.ready == 'true'
         env:
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           SSH_USER: ${{ secrets.SSH_USER }}
@@ -121,6 +135,7 @@ jobs:
             "${EXCLUDES[@]}" dist/ "$TARGET/dist/"
 
       - name: 安装运行依赖并重启服务
+        if: steps.guard.outputs.ready == 'true'
         env:
           SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
           SSH_USER: ${{ secrets.SSH_USER }}
