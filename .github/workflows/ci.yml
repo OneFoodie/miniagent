@@ -120,19 +120,22 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           TARGET="$SSH_USER@$SSH_HOST:$DEPLOY_PATH"
-          # 刻意不加 --delete：服务器上的 .env / knowledge / memory / history 等运行时
-          # 数据必须留着。代价是远端 dist/ 可能残留已删除源文件对应的旧 .js，
-          # 本规模下可接受，需要时手动清理。
-          EXCLUDES=(
-            --exclude .env --exclude node_modules/ --exclude knowledge/
-            --exclude memory/ --exclude history/ --exclude traces/
-            --exclude workspace/ --exclude vector-db/ --exclude checkpoints/
-            --exclude .cache/ --exclude models/
-          )
-          rsync -az --no-perms --omit-dir-times -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT" \
-            "${EXCLUDES[@]}" public/ skills/ package.json package-lock.json "$TARGET/"
-          rsync -az --no-perms --omit-dir-times -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT" \
-            "${EXCLUDES[@]}" dist/ "$TARGET/dist/"
+          # 只同步这一类东西：编译产物、静态资源、技能包、依赖清单。
+          # 三条铁律（每条都是实测踩出来的）：
+          #   1) 源目录**不带**尾斜杠。写 `public/` 时 rsync 会把 public 的内容展平进
+          #      目标目录，实测把 app.js/index.html/styles.css 直接倒进了部署根目录，
+          #      而真正的 public/ 从未被更新过（旧内容恰好在，所以没暴露）。
+          #      `public` 才会在目标下建出 public/ 子目录。
+          #   2) **不加 --delete**。服务器上的 .env / knowledge / memory / history 等
+          #      运行时数据必须留着。没有 --delete，也就**不需要任何 --exclude**——
+          #      之前那串 --exclude 不但多余，还因为未锚定而把 dist/memory/、dist/history/、
+          #      dist/knowledge/ 一并挡掉，导致编译产物缺文件。
+          #   3) --no-owner --no-group。否则文件属主被设成 runner 的 uid 1001
+          #      （服务器上不存在该用户）。权限统一交给远端那步 chmod 兜住。
+          RSYNC_OPTS=(-az --no-perms --no-owner --no-group --omit-dir-times
+            -e "ssh -i ~/.ssh/id_deploy -p $SSH_PORT")
+          rsync "${RSYNC_OPTS[@]}" \
+            dist public skills package.json package-lock.json "$TARGET/"
 
       - name: 安装运行依赖并重启服务
         if: steps.guard.outputs.ready == 'true'
@@ -153,7 +156,10 @@ jobs:
           # 崩溃循环（已实测踩到）。
           umask 0022
           npm ci --omit=dev --omit=optional --no-audit --no-fund
-          chmod -R a+rX node_modules
+          # 权限统一在这里兜住：rsync 用 --no-perms，落到服务器的权限取决于
+          # runner 的 umask 与 artifact 的存储权限（实测 checkout 出来是 640、
+          # artifact 是 644）。640 会让服务用户读不到 public/ 而整站 500。
+          chmod -R a+rX node_modules dist public skills
           # 配置菜单要改写 .env（原子写会在部署目录建临时文件再 rename），
           # 所以部署目录与 .env 都得让服务用户所在组可写。组名从 systemd 取，不写死。
           SVC_GROUP=\$(systemctl show '$SERVICE_NAME' -p Group --value)
