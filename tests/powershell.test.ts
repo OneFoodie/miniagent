@@ -14,13 +14,15 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import { loadSettings, type Settings } from "../src/core/config.js";
+import { buildChildEnv } from "../src/tools/builtins/shell/exec.js";
 import {
-  buildChildEnv,
-  checkReadonlyCommand,
   POWERSHELL_TOOL_NAME,
   registerPowershell,
-  resolvePowershellExecutable,
-} from "../src/tools/builtins/powershell.js";
+} from "../src/tools/builtins/shell/index.js";
+import {
+  checkReadonlyCommand,
+  powershellAdapter,
+} from "../src/tools/builtins/shell/powershell.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 
 const execFileAsync = promisify(execFile);
@@ -29,7 +31,7 @@ const execFileAsync = promisify(execFile);
 async function hasPowerShell(): Promise<boolean> {
   try {
     await execFileAsync(
-      resolvePowershellExecutable(""),
+      powershellAdapter.executable(""),
       ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.Major"],
       { timeout: 20_000 },
     );
@@ -170,8 +172,8 @@ describe("档位与注册", () => {
   });
 
   it("可执行文件可配置；留空时按平台给默认值", () => {
-    expect(resolvePowershellExecutable("C:\\custom\\pwsh.exe")).toBe("C:\\custom\\pwsh.exe");
-    expect(resolvePowershellExecutable("")).toBe(
+    expect(powershellAdapter.executable("C:\\custom\\pwsh.exe")).toBe("C:\\custom\\pwsh.exe");
+    expect(powershellAdapter.executable("")).toBe(
       process.platform === "win32" ? "powershell" : "pwsh",
     );
   });

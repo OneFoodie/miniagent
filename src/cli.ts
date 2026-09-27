@@ -32,7 +32,7 @@ import { createOtelExporter, describeOtel } from "./observability/otel.js";
 import { Tracer } from "./observability/tracer.js";
 import { registerSkillTools, SkillRegistry } from "./skills/index.js";
 import { registerBuiltins } from "./tools/builtins/index.js";
-import { describePowershell } from "./tools/builtins/powershell.js";
+import { describeShell } from "./tools/builtins/shell/index.js";
 import { childRegistryOf, registerSubagent } from "./tools/builtins/subagent.js";
 import { ToolRegistry } from "./tools/registry.js";
 
@@ -179,7 +179,7 @@ async function main(): Promise<void> {
     `知识库: ${describeKnowledgeBackend(settings)}（${settings.knowledgeDirs.join("、")}）\n`,
   );
   process.stdout.write(`MCP 工具: ${describeMcp(mcp)}\n`);
-  process.stdout.write(`通用执行: ${describePowershell(settings)}\n`);
+  process.stdout.write(`通用执行: ${describeShell(settings)}\n`);
   process.stdout.write(`可观测: ${describeOtel(settings)}\n`);
   process.stdout.write(
     "输入你的任务开始对话；/reset 清空历史，/runs 列出可续跑运行，" +

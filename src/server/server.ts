@@ -68,7 +68,7 @@ import {
 import { Tracer } from "../observability/tracer.js";
 import { registerSkillTools, SkillRegistry } from "../skills/index.js";
 import { registerBuiltins, reapplyTools } from "../tools/builtins/index.js";
-import { describePowershell } from "../tools/builtins/powershell.js";
+import { describeShell } from "../tools/builtins/shell/index.js";
 import {
   childRegistryOf,
   registerSubagent,
@@ -724,7 +724,7 @@ async function main(): Promise<void> {
   };
 
   logger.info(`长期记忆后端: ${deps.longTermLabel}`);
-  logger.info(`通用执行通道: ${describePowershell(settings)}`);
+  logger.info(`通用执行通道: ${describeShell(settings)}`);
   logger.info(`可观测导出: ${describeOtel(settings)}`);
   // 刻意不在这里统计文档数：语义后端会因此触发首次索引（含模型下载），把启动拖成几分钟
   logger.info(
@@ -760,7 +760,7 @@ async function main(): Promise<void> {
     process.stdout.write(`知识库: ${describeKnowledgeBackend(settings)}\n`);
     process.stdout.write(`知识库目录: ${settings.knowledgeDirs.join("、")}\n`);
     process.stdout.write(`MCP 工具: ${describeMcp(mcp)}\n`);
-    process.stdout.write(`通用执行: ${describePowershell(settings)}\n`);
+    process.stdout.write(`通用执行: ${describeShell(settings)}\n`);
     process.stdout.write(`可观测: ${describeOtel(settings)}\n`);
     openBrowser(url);
   });

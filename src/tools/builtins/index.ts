@@ -5,7 +5,7 @@ import type { ToolRegistry } from "../registry.js";
 import { calculator } from "./calculator.js";
 import { httpFetch } from "./httpFetch.js";
 import { registerFileTools } from "./files.js";
-import { POWERSHELL_TOOL_NAME, registerPowershell } from "./powershell.js";
+import { POWERSHELL_TOOL_NAME, registerPowershell } from "./shell/index.js";
 import { webSearch } from "./webSearch.js";
 
 /** 注册框架全部内置工具 */
