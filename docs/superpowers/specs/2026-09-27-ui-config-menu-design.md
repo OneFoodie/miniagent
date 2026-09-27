@@ -124,6 +124,12 @@ export function writeEnvValues(
 
 配套一个读写入口（非纯函数，落盘用）：读取 `.env` → `writeEnvValues` → 原子写（写临时文件后 rename，避免写一半进程被杀导致 `.env` 损坏）。
 
+**存量键的兼容处理**：当前 `.env` 用的是旧变量名 `MINIAGENT_DEEPSEEK_API_KEY`，而 `loadSettings` 读的是 `readString("MINIAGENT_API_KEY", readString("MINIAGENT_DEEPSEEK_API_KEY", ""))`——即新名优先。因此：
+
+- UI 首次保存 `apiKey` 会在文件里**追加** `MINIAGENT_API_KEY=...`（不删除旧的 `MINIAGENT_DEEPSEEK_API_KEY`），生效值以新名为准；
+- `GET /api/config` **直接读内存里的 `settings` 对象**（`loadSettings` 已完成优先级解析，`settings.apiKey` 就是生效值），不要另写一套变量名探测逻辑——那样必然与 `loadSettings` 漂移。
+- 保存后仍写新变量名（`MINIAGENT_API_KEY` / `MINIAGENT_BASE_URL`），于是重启后的解析结果与保存时的内存值一致。
+
 ### 3.3 后端接口
 
 在 `src/server/server.ts` 新增两条路由。
@@ -147,6 +153,7 @@ export function writeEnvValues(
 
 - 鉴权（见 3.4）。
 - 请求体：`{ "values": { "model": "...", "powershellMode": "off", ... } }`，只提交要改的项。
+- **前端只提交与「打开面板时的初值」不同的项**。这条不是可选优化：若用户只是打开面板看一眼就点保存，把 `readonly` 位置上的开关（显示为关）当成 `off` 提交，会静默降级掉只读白名单。
 - 流程：
   1. **逐项校验**（类型、`number` 的 `min`/`max`、`powershellMode` 只认三值、不含换行、`baseUrl`/`model` 非空）——任一项不过返回 `400`，附字段级错误信息，**不做部分写入**；
   2. `apiKey` 字段**留空或缺失表示保持原值**（前端不回填明文，用户不填就不动）；
