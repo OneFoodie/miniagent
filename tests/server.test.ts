@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { ApprovalAllowlist } from "../src/agent/allowlist.js";
+import { saveCheckpoint } from "../src/agent/checkpoint.js";
 import { loadSettings, type Settings } from "../src/core/config.js";
 import { SessionStore } from "../src/history/store.js";
 import type { KnowledgeBase } from "../src/knowledge/index.js";
@@ -109,13 +111,19 @@ beforeEach(async () => {
     traceDir: join(tempDir, "traces"),
     historyDir: join(tempDir, "history"),
     workspace: join(tempDir, "workspace"),
+    // 待审批存档写这里，供 /api/approve 的用例构造现场
+    checkpointDir: join(tempDir, "checkpoints"),
     // 配置接口写盘的目标：指向临时目录，绝不碰开发者真实 .env
     envFile: join(tempDir, ".env"),
     adminToken: "test-admin-token",
+    approvalAllowlistFile: join(tempDir, "approvals", "allowlist.jsonl"),
   };
 
   const registry = new ToolRegistry();
   registry.register(calculator);
+
+  const allowlist = new ApprovalAllowlist(settings.approvalAllowlistFile);
+  await allowlist.load();
 
   deps = {
     settings,
@@ -129,6 +137,9 @@ beforeEach(async () => {
     metrics: new Metrics(),
     otel: createOtelExporter(settings),
     memories: new Map(),
+    allowlist,
+    // 默认放行；需要拒绝的用例自行替换
+    aiApprover: { judge: async () => ({ verdict: "approve", reason: "测试放行" }) },
   };
 
   server = createServer(createRequestHandler(deps));
@@ -689,5 +700,207 @@ describe("配置接口", () => {
     expect(deps.settings.apiKey).toBe("sk-new-key-value");
     const env = await readFile(deps.settings.envFile, "utf-8");
     expect(env).toContain("MINIAGENT_API_KEY=sk-new-key-value\n");
+  });
+});
+
+describe("人工审批接口鉴权与命令级放行", () => {
+  const TOKEN = "test-admin-token";
+
+  function approve(body: unknown, token?: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/approve`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "X-Admin-Token": token } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function getAllowlist(token?: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/allowlist`, {
+      headers: token ? { "X-Admin-Token": token } : {},
+    });
+  }
+
+  function deleteAllowlist(body: unknown, token?: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/allowlist`, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "X-Admin-Token": token } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** 造一份挂在某个工具调用上的待审批存档 */
+  async function pendingCheckpoint(
+    runId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    await saveCheckpoint(deps.settings.checkpointDir, {
+      runId,
+      input: "原始问题",
+      createdAt: 1,
+      updatedAt: 1,
+      iterations: 0,
+      usage: { promptTokens: 0, completionTokens: 0 },
+      messages: [{ role: "system", content: "系统" }],
+      promptVersions: [],
+      approvals: {},
+      pendingApproval: { callId: "c1", tool, arguments: args },
+    });
+  }
+
+  it("未配置管理令牌时三个接口一律 403", async () => {
+    deps.settings.adminToken = "";
+    expect((await approve({ run_id: "run_x", approved: true }, TOKEN)).status).toBe(403);
+    expect((await getAllowlist(TOKEN)).status).toBe(403);
+    expect((await deleteAllowlist({ tool: "shell", arguments: {} }, TOKEN)).status).toBe(403);
+  });
+
+  it("令牌缺失或错误时 401", async () => {
+    expect((await approve({ run_id: "run_x", approved: true })).status).toBe(401);
+    expect((await approve({ run_id: "run_x", approved: true }, "wrong")).status).toBe(401);
+    expect((await getAllowlist()).status).toBe(401);
+    expect((await getAllowlist("wrong")).status).toBe(401);
+    expect((await deleteAllowlist({ tool: "shell", arguments: {} }, "wrong")).status).toBe(401);
+  });
+
+  it("批准并 remember：记入白名单，响应带 remembered", async () => {
+    await pendingCheckpoint("run_ok", "shell", { command: "date" });
+
+    const response = await approve(
+      { run_id: "run_ok", approved: true, remember: true },
+      TOKEN,
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      call: { tool: string; arguments: Record<string, unknown> };
+      remembered: boolean;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.remembered).toBe(true);
+    expect(body.call.tool).toBe("shell");
+
+    const listed = (await (await getAllowlist(TOKEN)).json()) as {
+      entries: Array<{ tool: string; arguments: Record<string, unknown> }>;
+    };
+    expect(listed.entries).toHaveLength(1);
+    expect(listed.entries[0]).toMatchObject({ tool: "shell", arguments: { command: "date" } });
+  });
+
+  it("拒绝时即使 remember=true 也不写白名单", async () => {
+    await pendingCheckpoint("run_no", "shell", { command: "rm -rf /" });
+
+    const response = await approve({ run_id: "run_no", approved: false, remember: true }, TOKEN);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { remembered: boolean }).remembered).toBe(false);
+
+    const listed = (await (await getAllowlist(TOKEN)).json()) as { entries: unknown[] };
+    expect(listed.entries).toHaveLength(0);
+  });
+
+  it("没有待审批项返回 404；请求体不合法返回 400", async () => {
+    expect((await approve({ run_id: "no_such_run", approved: true }, TOKEN)).status).toBe(404);
+    expect((await approve({ run_id: "run_x" }, TOKEN)).status).toBe(400);
+    expect((await approve({ run_id: "../etc", approved: true }, TOKEN)).status).toBe(400);
+  });
+
+  it("DELETE 白名单：删到返回 removed:true，删不存在返回 false，非法体 400", async () => {
+    await deps.allowlist.add("shell", { command: "date" });
+
+    const first = await deleteAllowlist(
+      { tool: "shell", arguments: { command: "date" } },
+      TOKEN,
+    );
+    expect(first.status).toBe(200);
+    expect(((await first.json()) as { removed: boolean }).removed).toBe(true);
+
+    const again = await deleteAllowlist(
+      { tool: "shell", arguments: { command: "date" } },
+      TOKEN,
+    );
+    expect(((await again.json()) as { removed: boolean }).removed).toBe(false);
+
+    expect((await deleteAllowlist({ tool: "shell" }, TOKEN)).status).toBe(400);
+  });
+});
+
+describe("POST /api/chat 的权限档位", () => {
+  const TOKEN = "test-admin-token";
+
+  function postChatWithMode(body: unknown, token?: string): Promise<Response> {
+    return fetch(`${baseUrl}/api/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "X-Admin-Token": token } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("manual（或缺省）不需要令牌，run_started 回带档位", async () => {
+    deps.llm = new FakeLLM([finalResponse("好的")]);
+    const response = await postChatWithMode({ message: "你好" });
+    expect(response.status).toBe(200);
+
+    const events = await collectSse(response);
+    const started = events[0]!.data as { permission_mode: string };
+    expect(started.permission_mode).toBe("manual");
+  });
+
+  it("非 manual 档缺令牌 401、错令牌 401、对令牌 200 并回带档位", async () => {
+    deps.llm = new FakeLLM([finalResponse("好的")]);
+
+    expect((await postChatWithMode({ message: "hi", permission_mode: "full" })).status).toBe(401);
+    expect(
+      (await postChatWithMode({ message: "hi", permission_mode: "ai" }, "wrong")).status,
+    ).toBe(401);
+
+    const ok = await postChatWithMode({ message: "hi", permission_mode: "full" }, TOKEN);
+    expect(ok.status).toBe(200);
+    const events = await collectSse(ok);
+    expect((events[0]!.data as { permission_mode: string }).permission_mode).toBe("full");
+  });
+
+  it("未配置令牌时非 manual 档也 403（堵住公网提权）", async () => {
+    deps.settings.adminToken = "";
+    expect(
+      (await postChatWithMode({ message: "hi", permission_mode: "ai" }, TOKEN)).status,
+    ).toBe(403);
+  });
+
+  it("非法档位值返回 400 并列出候选", async () => {
+    const response = await postChatWithMode({ message: "hi", permission_mode: "ait" });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("manual");
+  });
+
+  it("ai 档：AI 的裁决以 approval_ai_verdict 事件推给前端", async () => {
+    deps.settings.approvalTools = ["calculator"];
+    deps.aiApprover = { judge: async () => ({ verdict: "approve", reason: "只读查询" }) };
+    deps.llm = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "1+1" }]]),
+      finalResponse("等于 2"),
+    ]);
+
+    const response = await postChatWithMode({ message: "1+1", permission_mode: "ai" }, TOKEN);
+    expect(response.status).toBe(200);
+    const events = await collectSse(response);
+    const verdict = events.find((item) => item.event === "approval_ai_verdict");
+    expect(verdict?.data).toMatchObject({
+      tool: "calculator",
+      verdict: "approve",
+      reason: "只读查询",
+    });
+    // 工具照常执行、正常收尾
+    expect(events.map((item) => item.event)).toContain("tool_end");
+    expect(events.at(-1)!.event).toBe("done");
   });
 });

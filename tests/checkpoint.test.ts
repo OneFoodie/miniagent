@@ -316,3 +316,134 @@ describe("断点续跑", () => {
     await expect(agent.resume("no_such_run")).rejects.toThrow("找不到可续跑的运行存档");
   });
 });
+
+describe("权限档位与 AI 审批的裁决路径", () => {
+  /** 只回固定裁决的替身；调用次数用于断言「白名单命中时不问 AI」 */
+  function approver(verdict: "approve" | "deny", reason = "测试裁决"): {
+    judge: () => Promise<{ verdict: "approve" | "deny"; reason: string }>;
+    calls: number;
+  } {
+    const spy = {
+      calls: 0,
+      judge: async () => {
+        spy.calls += 1;
+        return { verdict, reason };
+      },
+    };
+    return spy;
+  }
+
+  it("完全访问档：敏感工具也直接执行，不挂起", async () => {
+    const settings = await testSettings({ approvalTools: ["calculator"] });
+    const fake = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "1+1" }]]),
+      finalResponse("等于 2"),
+    ]);
+    const agent = new Agent(fake, makeRegistry(), settings, new EventBus(), {
+      permissionMode: "full",
+    });
+
+    const result = await agent.run("算一下");
+    expect(result.answer).toBe("等于 2");
+    expect(result.context.tools).toEqual([{ name: "calculator", ok: true }]);
+  });
+
+  it("手动审批档（默认）：敏感工具挂起等人工", async () => {
+    const settings = await testSettings({ approvalTools: ["calculator"] });
+    const fake = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "1+1" }]]),
+    ]);
+    const agent = new Agent(fake, makeRegistry(), settings, new EventBus());
+
+    await expect(agent.run("算一下")).rejects.toBeInstanceOf(ApprovalRequiredError);
+  });
+
+  it("自动 AI 审批档：放行则执行，并留下裁决事件", async () => {
+    const settings = await testSettings({ approvalTools: ["calculator"] });
+    const fake = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "1+1" }]]),
+      finalResponse("等于 2"),
+    ]);
+    const bus = new EventBus();
+    const verdicts: Array<Record<string, unknown>> = [];
+    bus.subscribe(EventType.ApprovalAiVerdict, async (event) => {
+      verdicts.push(event.payload);
+    });
+
+    const agent = new Agent(fake, makeRegistry(), settings, bus, {
+      permissionMode: "ai",
+      aiApprover: approver("approve", "只读查询"),
+    });
+    const result = await agent.run("算一下");
+
+    expect(result.answer).toBe("等于 2");
+    expect(result.context.tools).toEqual([{ name: "calculator", ok: true }]);
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatchObject({ verdict: "approve", reason: "只读查询" });
+  });
+
+  it("自动 AI 审批档：拒绝则不执行，把 AI 的理由回灌给模型", async () => {
+    const settings = await testSettings({ approvalTools: ["calculator"] });
+    const fake = new FakeLLM([
+      toolCallResponse([["c1", "calculator", { expression: "危险" }]]),
+      finalResponse("那我换个办法"),
+    ]);
+    const bus = new EventBus();
+    const ran: string[] = [];
+    bus.subscribe(EventType.ToolEnd, async (event) => {
+      ran.push(String(event.payload.name));
+    });
+
+    const agent = new Agent(fake, makeRegistry(), settings, bus, {
+      permissionMode: "ai",
+      aiApprover: approver("deny", "破坏性操作"),
+    });
+    const result = await agent.run("算一下");
+
+    expect(result.answer).toBe("那我换个办法");
+    // 工具一次都没跑
+    expect(ran).toEqual([]);
+    const toolMessage = result.messages.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain("拒绝");
+    expect(toolMessage?.content).toContain("破坏性操作");
+  });
+
+  it("白名单命中：三档下都放行，且连 AI 都不调用", async () => {
+    const settings = await testSettings({ approvalTools: ["calculator"] });
+    for (const mode of ["manual", "ai", "full"] as const) {
+      const fake = new FakeLLM([
+        toolCallResponse([["c1", "calculator", { expression: "1+1" }]]),
+        finalResponse("等于 2"),
+      ]);
+      const aiApprover = approver("deny", "不该被问到");
+      const agent = new Agent(fake, makeRegistry(), settings, new EventBus(), {
+        permissionMode: mode,
+        aiApprover,
+        allowlist: { has: () => true },
+      });
+      const result = await agent.run("算一下");
+
+      expect(result.answer).toBe("等于 2");
+      expect(aiApprover.calls).toBe(0);
+    }
+  });
+
+  it("非敏感工具：三档下都直接执行", async () => {
+    const settings = await testSettings({ approvalTools: [] });
+    for (const mode of ["manual", "ai", "full"] as const) {
+      const fake = new FakeLLM([
+        toolCallResponse([["c1", "calculator", { expression: "2*3" }]]),
+        finalResponse("等于 6"),
+      ]);
+      const aiApprover = approver("deny");
+      const agent = new Agent(fake, makeRegistry(), settings, new EventBus(), {
+        permissionMode: mode,
+        aiApprover,
+      });
+      const result = await agent.run("算一下");
+
+      expect(result.answer).toBe("等于 6");
+      expect(aiApprover.calls).toBe(0);
+    }
+  });
+});

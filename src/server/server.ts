@@ -21,6 +21,8 @@ import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Agent } from "../agent/agent.js";
+import { AiApprover } from "../agent/aiApprover.js";
+import { ApprovalAllowlist } from "../agent/allowlist.js";
 import { listCheckpoints, loadCheckpoint, recordApproval } from "../agent/checkpoint.js";
 import { AgentContext } from "../agent/context.js";
 import { loadSettings, type Settings } from "../core/config.js";
@@ -35,6 +37,11 @@ import { updateEnvFile } from "../core/envFile.js";
 import { ApprovalRequiredError, MiniAgentError } from "../core/errors.js";
 import { EventBus, EventType, makeEvent } from "../core/events.js";
 import { getLogger, setupLogging } from "../core/logging.js";
+import {
+  parsePermissionMode,
+  type PermissionMode,
+  type ToolApprover,
+} from "../core/permission.js";
 import type { Message } from "../core/types.js";
 import {
   SessionStore,
@@ -110,6 +117,11 @@ interface ChatRequest {
   session_id?: string;
   /** 可选：续跑某个中断/挂起的运行；给了它就不需要 message */
   resume_run_id?: string;
+  /**
+   * 可选：会话权限档位（manual / ai / full）。不传即 manual。
+   * 类型留成 unknown，好让非法类型也走 parsePermissionMode 的报错路径而不是被静默吞掉。
+   */
+  permission_mode?: unknown;
 }
 
 /** 服务器级依赖：启动时构建一次，各请求复用。导出以便测试自行拼装 */
@@ -130,6 +142,10 @@ export interface ServerDeps {
   otel: OtelLike;
   /** 每个会话一个摘要记忆实例，避免不同会话的历史摘要互相污染 */
   memories: Map<string, SummaryMemory>;
+  /** 命令级放行白名单：进程内一份，跨请求共享（approve 写、chat 查） */
+  allowlist: ApprovalAllowlist;
+  /** AI 审批器：自动 AI 审批档下裁决工具调用。用接口类型便于测试注入替身 */
+  aiApprover: ToolApprover;
 }
 
 /** 会话 id 只允许安全字符，与 SessionStore 的校验保持一致 */
@@ -178,7 +194,14 @@ async function readJsonBody(request: IncomingMessage): Promise<ChatRequest> {
     history: Array.isArray(parsed.history) ? parsed.history : [],
     session_id: typeof parsed.session_id === "string" ? parsed.session_id : undefined,
     resume_run_id: resumeRunId,
+    permission_mode: parsed.permission_mode,
   };
+}
+
+/** 写一个 JSON 响应；状态码与体都由调用方给定 */
+function writeJson(response: ServerResponse, status: number, payload: unknown): void {
+  response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify(payload));
 }
 
 /** 以 SSE 格式写一条事件（连接已关闭时安全跳过） */
@@ -416,6 +439,27 @@ async function handleChat(
   const { settings } = deps;
   const body = await readJsonBody(request);
 
+  // 档位与鉴权必须在写 SSE 头之前定下来：非法档位要 400，非默认档缺令牌要 401/403，
+  // 这些都不能混在 200 的流里返回。
+  let permissionMode: PermissionMode;
+  try {
+    permissionMode = parsePermissionMode(body.permission_mode);
+  } catch (error) {
+    writeJson(response, 400, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  // 非默认档会放大权限（full 直接执行、ai 让 AI 放行），必须过管理令牌；
+  // manual 更保守、不放大任何权限，因此不需要令牌，公网访客也只能停在这一档。
+  if (permissionMode !== "manual") {
+    const auth = checkAdminAuth(request, settings);
+    if (!auth.ok) {
+      writeJson(response, auth.status, { error: auth.error });
+      return;
+    }
+  }
+
   response.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache",
@@ -452,6 +496,8 @@ async function handleChat(
     run_id: context.runId,
     session_id: sessionId,
     resumed: resuming,
+    // 回带生效档位：前端据此把下拉显示成当前档（非法值已在上面被挡掉）
+    permission_mode: permissionMode,
   });
 
   // 客户端断开连接时取消运行（监听 response.close 而非 request.close，
@@ -505,6 +551,16 @@ async function handleChat(
       output: event.payload.output,
     });
   });
+  // AI 审批裁决：前端据此在时间线上渲染一步（含理由），让「AI 判了什么」可被事后核对
+  bus.subscribe(EventType.ApprovalAiVerdict, async (event) => {
+    writeSSE(response, "approval_ai_verdict", {
+      tool: event.payload.tool,
+      arguments: event.payload.arguments,
+      verdict: event.payload.verdict,
+      reason: event.payload.reason,
+      latency: Number((event.payload.latency as number).toFixed(2)),
+    });
+  });
 
   // Agent 是无状态门面（历史从请求传入），每请求新建并绑定本请求的 bus；
   // LLM 客户端只持有配置，直接复用启动时建的实例
@@ -527,6 +583,10 @@ async function handleChat(
     longTerm: deps.longTerm,
     // 上一轮真的执行过什么，进系统提示词的证据小节（见 lastTurnToolFacts）
     executionLedger: lastTurnToolFacts(priorTurns),
+    // 本次请求的权限档位与配套的审批器/白名单：续跑走同一个 agent，档位同样生效
+    permissionMode,
+    aiApprover: deps.aiApprover,
+    allowlist: deps.allowlist,
   });
 
   // 续跑时用户消息要取存档里的原始问题：请求体里的 message 是空的
@@ -708,6 +768,10 @@ async function main(): Promise<void> {
     childRegistry: (role) => childRegistryOf(registry, role),
   });
 
+  // 命令级放行白名单与 AI 审批器：进程内各建一次，经 ServerDeps 供各请求复用
+  const allowlist = new ApprovalAllowlist(settings.approvalAllowlistFile);
+  await allowlist.load();
+
   const deps: ServerDeps = {
     settings,
     registry,
@@ -721,11 +785,14 @@ async function main(): Promise<void> {
     metrics: new Metrics(),
     otel: createOtelExporter(settings),
     memories: new Map<string, SummaryMemory>(),
+    allowlist,
+    aiApprover: new AiApprover(llm, settings),
   };
 
   logger.info(`长期记忆后端: ${deps.longTermLabel}`);
   logger.info(`通用执行通道: ${describeShell(settings)}`);
   logger.info(`可观测导出: ${describeOtel(settings)}`);
+  logger.info(`放行白名单: ${allowlist.list().length} 条（${settings.approvalAllowlistFile}）`);
   // 刻意不在这里统计文档数：语义后端会因此触发首次索引（含模型下载），把启动拖成几分钟
   logger.info(
     `知识库: ${describeKnowledgeBackend(settings)}（目录 ${settings.knowledgeDirs.join("、")}）`,
@@ -867,34 +934,82 @@ export function createRequestHandler(deps: ServerDeps) {
     // 人工审批：只写决定，续跑由客户端再发一次 /api/chat {resume_run_id}
     // 拆成两步是为了让决定落盘——两步之间进程重启也不丢
     if (request.method === "POST" && urlPath === "/api/approve") {
-      readRawBody(request)
+      // 审批能放行 shell 这类无沙箱工具，等于把本机执行权交出去，必须先过管理令牌
+      const auth = checkAdminAuth(request, settings);
+      if (!auth.ok) {
+        writeJson(response, auth.status, { ok: false, error: auth.error });
+        return;
+      }
+      void readRawBody(request)
         .then(async (raw) => {
-          const { run_id: runId, approved } = JSON.parse(raw) as {
+          const { run_id: runId, approved, remember } = JSON.parse(raw) as {
             run_id?: string;
             approved?: boolean;
+            remember?: boolean;
           };
           if (!runId || !SAFE_ID.test(runId) || typeof approved !== "boolean") {
-            response.writeHead(400, { "Content-Type": "application/json" });
-            response.end(JSON.stringify({ ok: false, error: "需要 run_id 与布尔型 approved" }));
+            writeJson(response, 400, { ok: false, error: "需要 run_id 与布尔型 approved" });
             return;
           }
           const call = await recordApproval(settings.checkpointDir, runId, approved);
           if (!call) {
-            response.writeHead(404, { "Content-Type": "application/json" });
-            response.end(JSON.stringify({ ok: false, error: "该运行没有待审批项" }));
+            writeJson(response, 404, { ok: false, error: "该运行没有待审批项" });
             return;
           }
-          response.writeHead(200, { "Content-Type": "application/json" });
-          response.end(JSON.stringify({ ok: true, call }));
+          // 「批准并加入白名单」：只有批准才写入。拒绝时 remember 无意义，忽略即可，
+          // 否则会放行一条用户明确不想执行的命令。直接复用 recordApproval 返回的调用，
+          // 不再读一次存档。
+          let remembered = false;
+          if (approved && remember === true) {
+            await deps.allowlist.add(call.tool, call.arguments);
+            remembered = true;
+          }
+          writeJson(response, 200, { ok: true, call, remembered });
         })
         .catch((error: unknown) => {
-          response.writeHead(400, { "Content-Type": "application/json" });
-          response.end(
-            JSON.stringify({
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            }),
+          writeJson(response, 400, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      return;
+    }
+    // 命令级放行白名单：读取与撤回。它是运行期状态，同样只对持令牌者开放
+    if (
+      urlPath === "/api/allowlist" &&
+      (request.method === "GET" || request.method === "DELETE")
+    ) {
+      const auth = checkAdminAuth(request, settings);
+      if (!auth.ok) {
+        writeJson(response, auth.status, { error: auth.error });
+        return;
+      }
+      if (request.method === "GET") {
+        writeJson(response, 200, { entries: deps.allowlist.list() });
+        return;
+      }
+      void readRawBody(request)
+        .then(async (raw) => {
+          const parsed = JSON.parse(raw) as { tool?: unknown; arguments?: unknown };
+          if (
+            typeof parsed.tool !== "string" ||
+            parsed.arguments === null ||
+            typeof parsed.arguments !== "object" ||
+            Array.isArray(parsed.arguments)
+          ) {
+            writeJson(response, 400, { error: "需要 tool 字符串与 arguments 对象" });
+            return;
+          }
+          const removed = await deps.allowlist.remove(
+            parsed.tool,
+            parsed.arguments as Record<string, unknown>,
           );
+          writeJson(response, 200, { removed });
+        })
+        .catch((error: unknown) => {
+          writeJson(response, 400, {
+            error: error instanceof Error ? error.message : String(error),
+          });
         });
       return;
     }

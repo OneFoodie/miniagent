@@ -23,6 +23,9 @@ const configBtn = document.querySelector("#configBtn");
 const configPanel = document.querySelector("#configPanel");
 const sessionBadge = document.querySelector("#sessionBadge");
 const sessionTitle = document.querySelector("#sessionTitle");
+const permissionMode = document.querySelector("#permissionMode");
+const permissionHint = document.querySelector("#permissionHint");
+const permPicker = document.querySelector(".perm-picker");
 
 /** 单条输入/输出展示的最大字符数，超出则截断（完整内容见原始轨迹） */
 const MAX_IO_CHARS = 20000;
@@ -145,7 +148,7 @@ async function submit() {
   input.style.height = "auto";
 
   try {
-    await streamChat(message, assistantCard);
+    await runTurn(message, assistantCard);
   } catch (error) {
     assistantCard.markError(`请求中断：${error.message ?? error}`);
     statusDot.className = "status-dot error";
@@ -192,6 +195,8 @@ function createAssistantCard(container, userMessage) {
   const stepMap = new Map();
   let toolSeq = 0;
   let runId = null;
+  /** 审批条（同一时刻只可能有一个待批调用，因为挂起是整批挂起） */
+  let approvalEl = null;
 
   return {
     /** run_started 到达时记录，供"原始轨迹"按钮读取 */
@@ -337,6 +342,93 @@ function createAssistantCard(container, userMessage) {
       scrollToBottom();
     },
 
+    /** 中性备注块：AI 裁决结果、加入白名单的确认都走它，避免为每种提示各写一套 DOM */
+    addNote(text, danger = false) {
+      const note = document.createElement("div");
+      note.className = danger ? "ai-verdict deny" : "ai-verdict";
+      note.textContent = text;
+      card.appendChild(note);
+      scrollToBottom();
+    },
+
+    /**
+     * 渲染审批条并把「等用户点选」表达成一个 Promise。
+     *
+     * 用 Promise 而不是回调：调用方要在拿到决定之后紧接着续跑同一次运行，
+     * await 最能直白地写出这条时序（否则得把续跑逻辑塞进按钮回调里）。
+     */
+    askApproval(info) {
+      this.finish();
+      approvalEl = document.createElement("div");
+      approvalEl.className = "approval-card";
+
+      const title = document.createElement("p");
+      title.className = "approval-title";
+      title.textContent = "⚠ 需要人工审批";
+
+      const tool = document.createElement("div");
+      tool.className = "approval-tool";
+      tool.textContent = info.tool;
+
+      const args = document.createElement("pre");
+      args.className = "approval-args";
+      args.textContent = prettyJson(info.arguments);
+
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+      const status = document.createElement("span");
+      status.className = "approval-status";
+
+      const buttons = [];
+      const makeButton = (text, primary) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = primary ? "approval-btn primary" : "approval-btn";
+        button.textContent = text;
+        buttons.push(button);
+        return button;
+      };
+      const approve = makeButton("批准", true);
+      const deny = makeButton("拒绝", false);
+      const remember = makeButton("批准并加入白名单", false);
+      actions.append(approve, deny, remember, status);
+
+      approvalEl.append(title, tool, args, actions);
+      card.appendChild(approvalEl);
+      scrollToBottom();
+
+      return new Promise((resolve) => {
+        const decide = (approved, withWhitelist) => {
+          for (const button of buttons) button.disabled = true;
+          status.className = "approval-status";
+          status.textContent = approved
+            ? withWhitelist
+              ? "已批准，并已加入白名单…"
+              : "已批准，继续执行…"
+            : "已拒绝，让模型换条路…";
+          resolve({ approved, remember: withWhitelist });
+        };
+        approve.addEventListener("click", () => decide(true, false));
+        deny.addEventListener("click", () => decide(false, false));
+        remember.addEventListener("click", () => decide(true, true));
+      });
+    },
+
+    /** 审批决定已生效，撤掉审批条，让时间线接着往下走 */
+    clearApproval() {
+      if (approvalEl) approvalEl.remove();
+      approvalEl = null;
+    },
+
+    /** 审批接口失败时把原因写在审批条里（此时审批条还留着，方便用户处理后重试） */
+    setApprovalStatus(message, isError = false) {
+      if (!approvalEl) return;
+      const status = approvalEl.querySelector(".approval-status");
+      if (!status) return;
+      status.className = isError ? "approval-status error" : "approval-status";
+      status.textContent = message;
+    },
+
     markError(message) {
       this.finish();
       const banner = document.createElement("div");
@@ -456,6 +548,107 @@ async function toggleTrace(btn, panel, runId) {
   panel.hidden = false;
   btn.setAttribute("aria-expanded", "true");
 }
+
+/* ---------------- 权限档位 ---------------- */
+
+/**
+ * 三档权限：手动审批 / 自动AI审批 / 完全访问。
+ *
+ * 为什么需要它：原来输入框下方写的是「工具在沙箱内执行」，但那句话只对文件工具成立——
+ * shell 工具根本没有沙箱。与其给一句会误导人的说明，不如把「谁来把关」做成可选且可见的。
+ *
+ * 存在 sessionStorage（每个标签页一份），与当前会话的存法一致。刻意**不**按会话分别记：
+ * 下拉始终可见，所以不存在隐藏状态；按会话分开反而会出现「同一个标签页里切了会话、
+ * 档位却悄悄变了」这种更难察觉的情况。
+ *
+ * 非默认档需要管理令牌（服务端校验）：不这样做的话，公网实例上任何访客
+ * 都能一键给自己开「完全访问」，那这个下拉就成了提权按钮而不是安全控制。
+ */
+const PERMISSION_KEY = "miniagent.permissionMode";
+
+const PERMISSION_TEXT = {
+  manual: "每条敏感命令都会挂起，等你批准",
+  ai: "由 AI 裁决，不打扰你——这是便利层，不是安全防线",
+  full: "不审批，直接执行",
+};
+
+function currentPermissionMode() {
+  return sessionStorage.getItem(PERMISSION_KEY) ?? "manual";
+}
+
+/** 刷新下拉外观：完全访问用警示色；无令牌时锁在手动审批 */
+function renderPermissionPicker() {
+  const mode = currentPermissionMode();
+  permissionMode.value = mode;
+  permPicker.classList.toggle("danger", mode === "full");
+  permissionHint.textContent = PERMISSION_TEXT[mode] ?? "";
+
+  const canEscalate = adminToken() !== "";
+  for (const option of permissionMode.options) {
+    option.disabled = option.value !== "manual" && !canEscalate;
+  }
+  permissionMode.disabled = false;
+  if (!canEscalate) {
+    permissionHint.textContent =
+      "只有「手动审批」可用：切换到其它档位需要在配置菜单里填入管理令牌";
+  }
+}
+
+/**
+ * 切换档位。
+ *
+ * 非默认档要同时把执行通道切到 full —— 否则选了档位也跑不动（shellMode=off 时
+ * 工具根本没注册）。这是有副作用的：配置菜单里的 shellMode 会被这里覆盖，
+ * 所以**只在真的发生变化时提示**（用 PUT 返回的 applied 判断），不静默改。
+ */
+async function changePermissionMode(next) {
+  const escalated = next !== "manual";
+  if (escalated && adminToken() === "") {
+    sessionStorage.setItem(PERMISSION_KEY, "manual");
+    renderPermissionPicker();
+    return;
+  }
+
+  if (escalated) {
+    permissionHint.textContent = "正在切换…";
+    try {
+      const response = await configRequest({
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values: { shellMode: "full" } }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        // 令牌不对就退回手动审批，并把原因摆出来，不要留一个「看起来切了其实没切」的下拉
+        sessionStorage.setItem(PERMISSION_KEY, "manual");
+        renderPermissionPicker();
+        permissionHint.textContent =
+          (data.errors ?? []).map((item) => item.message).join("；") ||
+          data.error ||
+          `HTTP ${response.status}`;
+        return;
+      }
+      sessionStorage.setItem(PERMISSION_KEY, next);
+      renderPermissionPicker();
+      if ((data.applied ?? []).includes("shellMode")) {
+        permissionHint.textContent = `${PERMISSION_TEXT[next]}（已同时把执行通道切到 full）`;
+      }
+      return;
+    } catch (error) {
+      sessionStorage.setItem(PERMISSION_KEY, "manual");
+      renderPermissionPicker();
+      permissionHint.textContent = `切换失败：${error.message}`;
+      return;
+    }
+  }
+
+  sessionStorage.setItem(PERMISSION_KEY, next);
+  renderPermissionPicker();
+}
+
+permissionMode.addEventListener("change", () => {
+  void changePermissionMode(permissionMode.value);
+});
 
 /* ---------------- 会话历史（持久化 / 恢复 / 切换） ---------------- */
 
@@ -693,10 +886,15 @@ function switchState(mode) {
   return mode === "full" ? "full" : "off";
 }
 
-function configRequest(init) {
-  return fetch("/api/config", {
-    ...init,
-    headers: { "X-Admin-Token": adminToken(), ...(init?.headers ?? {}) },
+/**
+ * 带管理令牌的请求。默认打 /api/config；白名单接口复用同一个函数，
+ * 因为它们要的是同一把令牌与同一套 401/403 语义。
+ */
+function configRequest(init = {}) {
+  const { url = "/api/config", ...rest } = init;
+  return fetch(url, {
+    ...rest,
+    headers: { "X-Admin-Token": adminToken(), ...(rest.headers ?? {}) },
   });
 }
 
@@ -801,10 +999,15 @@ function renderConfigAuthError(status, serverMessage) {
   retry.textContent = "保存令牌并重试";
   const submit = () => {
     localStorage.setItem(ADMIN_TOKEN_KEY, tokenInput.value.trim());
+    // 令牌决定权限下拉能否切到非默认档。这里是「令牌不对」时的入口，
+    // 用户填完就想立刻能用；不刷新的话下拉会一直停在锁定态，看起来像「填了也没用」（实测踩到过）。
+    renderPermissionPicker();
     configPanel.textContent = "加载中…";
     void loadConfigPanel();
   };
   retry.addEventListener("click", submit);
+  // 失焦即保存，省掉「必须先点按钮」这一层
+  tokenInput.addEventListener("change", submit);
   actions.appendChild(retry);
   configPanel.appendChild(actions);
 
@@ -860,9 +1063,112 @@ function renderConfigPanel(values, readonlyModeNote) {
   tokenInput.value = adminToken();
   tokenInput.addEventListener("change", () => {
     localStorage.setItem(ADMIN_TOKEN_KEY, tokenInput.value.trim());
+    // 令牌决定权限下拉能否切到非默认档，改完要立刻反映出来
+    renderPermissionPicker();
   });
   tokenRow.append(tokenLabel, tokenInput);
   configPanel.appendChild(tokenRow);
+
+  configPanel.appendChild(makeAllowlistBlock());
+}
+
+/**
+ * 「已放行的命令」区块。
+ *
+ * 它是**一组条目**而不是标量配置，所以不进 schema 驱动的 CONFIG_FIELDS，
+ * 而是作为自定义区块挂在表单之后。存在的意义是「放行错了能撤」——
+ * 否则误放行一条危险命令后，只能登服务器去改 JSONL 文件。
+ */
+function makeAllowlistBlock() {
+  const block = document.createElement("div");
+  const title = document.createElement("h3");
+  title.textContent = "已放行的命令";
+  block.appendChild(title);
+
+  const body = document.createElement("div");
+  body.textContent = "加载中…";
+  block.appendChild(body);
+
+  void (async () => {
+    let entries;
+    try {
+      const response = await configRequest({ url: "/api/allowlist" });
+      const data = await response.json();
+      if (!response.ok) {
+        body.className = "allowlist-empty";
+        body.textContent = data.error ?? `加载失败（HTTP ${response.status}）`;
+        return;
+      }
+      entries = data.entries ?? [];
+    } catch {
+      body.className = "allowlist-empty";
+      body.textContent = "加载失败：服务未响应";
+      return;
+    }
+
+    body.innerHTML = "";
+    if (entries.length === 0) {
+      body.className = "allowlist-empty";
+      body.textContent = "还没有放行过任何命令。审批时点「批准并加入白名单」就会出现在这里。";
+      return;
+    }
+    for (const entry of entries) {
+      body.appendChild(makeAllowlistRow(entry, body));
+    }
+  })();
+
+  return block;
+}
+
+function makeAllowlistRow(entry, container) {
+  const row = document.createElement("div");
+  row.className = "allowlist-row";
+
+  const main = document.createElement("div");
+  main.className = "allowlist-main";
+  const tool = document.createElement("span");
+  tool.className = "allowlist-tool";
+  tool.textContent = `${entry.tool} `;
+  main.append(tool, document.createTextNode(summarizeArguments(entry.arguments)));
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "allowlist-del";
+  del.textContent = "撤回";
+  del.addEventListener("click", async () => {
+    del.disabled = true;
+    try {
+      const response = await configRequest({
+        url: "/api/allowlist",
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: entry.tool, arguments: entry.arguments }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.removed !== true) {
+        del.disabled = false;
+        del.textContent = "撤回失败";
+        return;
+      }
+      row.remove();
+      if (!container.querySelector(".allowlist-row")) {
+        container.className = "allowlist-empty";
+        container.textContent = "还没有放行过任何命令。";
+      }
+    } catch {
+      del.disabled = false;
+      del.textContent = "撤回失败";
+    }
+  });
+
+  row.append(main, del);
+  return row;
+}
+
+/** 参数摘要：单行、限量，避免一条超长命令把面板撑爆 */
+function summarizeArguments(args) {
+  const text = prettyJson(args).replace(/\s+/g, " ").trim();
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
 }
 
 function makeConfigRow(field, values, readonlyModeNote) {
@@ -1076,9 +1382,79 @@ document.addEventListener("click", (event) => {
 // 启动即恢复**本标签页**上次的会话（新标签页没有记录，于是从新对话开始）
 void restoreTabSession();
 
+// 权限档位：按本标签页记住的选择渲染，并按有无令牌决定能不能切到非默认档
+renderPermissionPicker();
+
 /* ---------------- SSE 流式通信 ---------------- */
 
-async function streamChat(message, card) {
+/**
+ * 提交一次审批决定。
+ * 决定必须落盘（服务端 `recordApproval`），因为「做决定」与「续跑」是两次请求，
+ * 两次之间进程可能重启。
+ */
+async function sendApprovalDecision(runId, decision) {
+  try {
+    const response = await fetch("/api/approve", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Admin-Token": adminToken(),
+      },
+      body: JSON.stringify({
+        run_id: runId,
+        approved: decision.approved,
+        remember: decision.remember === true,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail =
+        response.status === 401
+          ? "管理令牌不对：请在配置菜单里填对令牌再批"
+          : response.status === 403
+            ? "服务端未配置 MINIAGENT_ADMIN_TOKEN，审批接口已禁用"
+            : data.error ?? `HTTP ${response.status}`;
+      return { ok: false, error: detail };
+    }
+    return { ok: true, remembered: data.remembered === true };
+  } catch (error) {
+    return { ok: false, error: `审批请求失败：${error.message}` };
+  }
+}
+
+/**
+ * 跑一轮：流式对话 →（可能）撞上审批 → 拿到决定 → 续跑，直到没有待批。
+ *
+ * 为什么要单独一层循环：一次运行可能连续挂起多轮（每轮批一个工具），
+ * 而且续跑必须**接回同一张卡片**——另开一张卡会把一次问答拆成几段，
+ * 时间线与最终答案都散掉了。
+ */
+async function runTurn(message, card) {
+  let resumeRunId = null;
+  let payload = message;
+  for (;;) {
+    const outcome = await streamChat(payload, card, resumeRunId);
+    if (outcome.kind !== "approval") return;
+
+    const info = outcome.info;
+    const decision = await card.askApproval(info);
+    const result = await sendApprovalDecision(info.run_id, decision);
+    if (!result.ok) {
+      // 审批条留在原地，把原因写在它内部，方便用户处理好令牌后重试
+      card.setApprovalStatus(result.error, true);
+      return;
+    }
+    card.clearApproval();
+    if (result.remembered) {
+      card.addNote("已加入白名单：这条命令以后不再询问（可在配置菜单里撤回）");
+    }
+    resumeRunId = info.run_id;
+    // 续跑时模型侧不需要新输入：原始问题已在存档里
+    payload = "";
+  }
+}
+
+async function streamChat(message, card, resumeRunId = null) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1087,6 +1463,10 @@ async function streamChat(message, card) {
       history: chatHistory,
       // 带上会话 id，服务端据此续写并持久化
       session_id: sessionId ?? undefined,
+      // 续跑已挂起的运行：原始问题在存档里，所以 message 传空串
+      resume_run_id: resumeRunId ?? undefined,
+      // 权限档位随请求走（服务端对非默认档校验管理令牌）
+      permission_mode: currentPermissionMode(),
     }),
   });
 
@@ -1161,6 +1541,19 @@ async function streamChat(message, card) {
           card.endStream();
           card.showAnswer(renderMarkdown(parsed.data.answer), parsed.data);
           break;
+        case "approval_ai_verdict":
+          // 这一档不打扰人，所以裁决只作为时间线上的一条记录存在，供事后核对
+          card.addNote(
+            `AI 审批：${parsed.data.verdict === "approve" ? "放行" : "拒绝"} · ` +
+              `${parsed.data.reason}（${parsed.data.latency}s）`,
+            parsed.data.verdict !== "approve",
+          );
+          break;
+        case "approval_required":
+          // 挂起等人工：把决定权交给调用方（runTurn），它会渲染审批条、提交决定再续跑。
+          // 这里**直接返回**而不是继续读：服务端在发完这个事件后就是 done，
+          // 站在流里等用户点击只会白白占着一个 reader。
+          return { kind: "approval", info: parsed.data };
         case "error":
           // 状态点的重置统一交给 submit 的 finally 处理
           if (parsed.data.cancelled) {
@@ -1170,7 +1563,7 @@ async function streamChat(message, card) {
           }
           break;
         case "done":
-          return;
+          return { kind: "done" };
       }
     }
   }

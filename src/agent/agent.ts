@@ -12,6 +12,7 @@ import {
 } from "../core/errors.js";
 import { makeEvent, EventBus, EventType } from "../core/events.js";
 import { getLogger, runIdStorage } from "../core/logging.js";
+import type { AllowlistLookup, PermissionMode, ToolApprover } from "../core/permission.js";
 import type { LLMResponse, Message, ToolCall, ToolResult } from "../core/types.js";
 import type { BaseLLM } from "../llm/base.js";
 import type { LongTermMemory } from "../memory/base.js";
@@ -69,6 +70,18 @@ export interface AgentOptions {
    * 用来回答「我上一轮到底做过什么」这个问题。
    */
   executionLedger?: ToolFact[];
+  /**
+   * 权限档位：决定敏感工具由谁裁决。缺省 manual（与旧行为一致），
+   * 因此不传它时框架的行为与加这个字段之前完全相同。
+   */
+  permissionMode?: PermissionMode;
+  /** AI 审批器：仅 permissionMode==="ai" 时被调用；缺省则该档无从裁决，等同于不启用 */
+  aiApprover?: ToolApprover;
+  /**
+   * 命令级放行白名单：命中即免问（连 AI 都不调用）。
+   * 传同一个实例给 subagent，才能让子 agent 也认这份已放行清单。
+   */
+  allowlist?: AllowlistLookup;
 }
 
 /** 写存档所需的运行级信息（不进消息序列，但恢复时要能原样还原） */
@@ -89,6 +102,14 @@ type ActOutcome =
   | { kind: "ran"; resultById: Map<string, ToolResult> }
   | { kind: "needs-approval"; call: ToolCall };
 
+/**
+ * 一次工具调用的审批裁决：
+ *  - `allow`     直接执行（完全访问档、已放行、非敏感工具、或已有人工决定）
+ *  - `ask-human` 挂起等人工（手动审批档 + 敏感工具）
+ *  - `ask-ai`    交 AI 裁决（自动 AI 审批档 + 敏感工具）
+ */
+type ApprovalDecision = "allow" | "ask-human" | "ask-ai";
+
 /** 用户拒绝执行时回灌给模型的内容：必须说清「是被人拒了」，而不是「工具坏了」 */
 const APPROVAL_DENIED = "用户拒绝执行该工具调用，请换一种方式或直接说明无法完成";
 
@@ -99,6 +120,9 @@ export class Agent {
   private readonly memory?: SummaryMemory;
   private readonly longTerm?: LongTermMemory;
   private readonly executionLedger?: ToolFact[];
+  private readonly permissionMode: PermissionMode;
+  private readonly aiApprover?: ToolApprover;
+  private readonly allowlist?: AllowlistLookup;
 
   constructor(
     private readonly llm: BaseLLM,
@@ -107,10 +131,19 @@ export class Agent {
     private readonly bus: EventBus = new EventBus(),
     options: AgentOptions = {},
   ) {
+    this.permissionMode = options.permissionMode ?? "manual";
+    this.aiApprover = options.aiApprover;
+    this.allowlist = options.allowlist;
     this.runtime = new ToolRuntime(
       registry,
       settings.maxConcurrency,
       settings.toolTimeout,
+      // 档位、审批器与白名单随工具作用域下传：子 agent 据此沿用父 run 的档位（见 subagent.ts）
+      {
+        permissionMode: this.permissionMode,
+        aiApprover: this.aiApprover,
+        allowlist: this.allowlist,
+      },
     );
     this.promptBuilder =
       options.promptBuilder ?? promptBuilderForRole(options.role);
@@ -365,7 +398,7 @@ export class Agent {
         awaiting = response.toolCalls;
       }
 
-      const outcome = await this.act(awaiting, ctx, approvals);
+      const outcome = await this.act(awaiting, ctx, approvals, meta.input);
       if (outcome.kind === "needs-approval") {
         // 挂起：把现场、状态与待批调用一起落盘，外部给出决定后再续跑。
         // 这一步优先于下面的取消判断：待批现场是攒出来的，不能因为此刻收到取消就丢掉
@@ -553,27 +586,63 @@ export class Agent {
   /**
    * act：执行这批工具调用。
    *
-   * 需要审批而未决的调用会让整批先停下——**不能**只跳过它执行其余的：
+   * 需要人工审批而未决的调用会让整批先停下——**不能**只跳过它执行其余的：
    * 同一批工具往往是模型基于同一份判断一起发起的，批准其中一个而偷跑另一个没有意义。
+   *
+   * 自动 AI 审批档不同：AI 就地裁决、**不挂起**。因此它不写 checkpoint，
+   * 也不抛 ApprovalRequiredError；拒绝时把理由作为工具结果回灌，让模型知道可以换路。
    */
   private async act(
     calls: ToolCall[],
     ctx: AgentContext,
     approvals: Record<string, boolean>,
+    question: string,
   ): Promise<ActOutcome> {
+    // AI 拒绝的调用：callId → 理由。与人工拒绝统一按「不执行」处理，但轨迹里能区分
+    // （人工拒绝走 approvals，AI 拒绝走 approval_ai_verdict 事件）
+    const aiDenied = new Map<string, string>();
+    for (const call of calls) {
+      if (this.decideApproval(call, approvals) !== "ask-ai") continue;
+      // 走到这里 permissionMode 必为 "ai"；缺审批器时按拒绝处理更保守
+      const judgeStart = performance.now();
+      const verdict = this.aiApprover
+        ? await this.aiApprover.judge(call, question, ctx.signal)
+        : { verdict: "deny" as const, reason: "未配置 AI 审批器" };
+      await this.bus.publish(
+        makeEvent(
+          EventType.ApprovalAiVerdict,
+          {
+            tool: call.name,
+            arguments: call.arguments,
+            verdict: verdict.verdict,
+            reason: verdict.reason,
+            // 裁决耗时进轨迹：AI 审批是额外一次 LLM 调用，成本要能被看到
+            latency: (performance.now() - judgeStart) / 1000,
+          },
+          ctx.runId,
+        ),
+      );
+      if (verdict.verdict === "deny") aiDenied.set(call.id, verdict.reason);
+    }
+
     const undecided = calls.find(
-      (call) => this.needsApproval(call.name) && approvals[call.id] === undefined,
+      (call) => this.decideApproval(call, approvals) === "ask-human",
     );
     if (undecided) return { kind: "needs-approval", call: undecided };
 
-    // 被拒的调用不执行，直接把「用户拒绝」作为工具结果回灌——模型据此改走别的路子
+    // 被拒的调用不执行，直接把「被拒绝」作为工具结果回灌——模型据此改走别的路子
     const denied = calls.filter((call) => approvals[call.id] === false);
-    const toRun = calls.filter((call) => approvals[call.id] !== false);
+    const toRun = calls.filter(
+      (call) => approvals[call.id] !== false && !aiDenied.has(call.id),
+    );
     const batch = await this.runtime.executeBatch(toRun, ctx.runId, this.bus, ctx.signal);
 
     const resultById = new Map(batch);
     for (const call of denied) {
       resultById.set(call.id, { ok: false, error: APPROVAL_DENIED });
+    }
+    for (const [callId, reason] of aiDenied) {
+      resultById.set(callId, { ok: false, error: `${APPROVAL_DENIED}（AI 审批：${reason}）` });
     }
     return { kind: "ran", resultById };
   }
@@ -635,9 +704,27 @@ export class Agent {
     );
   }
 
-  /** 该工具是否需要人工审批 */
-  private needsApproval(toolName: string): boolean {
-    return this.settings.approvalTools.includes(toolName);
+  /**
+   * 裁决一条工具调用由谁放行。判定顺序（先宽后严，白名单优先于一切）：
+   *  1. 档位 = 完全访问           → 直接放行（即使工具在审批名单里）
+   *  2. 白名单命中 (tool, 参数)   → 直接放行（人工放行过，连 AI 都不调用）
+   *  3. 审批名单不含该工具         → 直接放行（本来就不是敏感工具）
+   *  4. 已有人工决定               → 放行（true 走执行、false 在上层按拒绝处理）
+   *  5. 手动审批档                 → 挂起等人工
+   *  6. 否则（自动 AI 审批档）     → 交 AI 裁决
+   *
+   * 第 4 步不写进设计文档的顺序，但 act() 必须认它：续跑时挂起的那次调用已被决定过，
+   * 不能再问第二遍。判定所需的信息都在内存里，全程同步——这正是白名单要常驻内存的原因。
+   */
+  private decideApproval(
+    call: ToolCall,
+    approvals: Record<string, boolean>,
+  ): ApprovalDecision {
+    if (this.permissionMode === "full") return "allow";
+    if (this.allowlist?.has(call.name, call.arguments)) return "allow";
+    if (!this.settings.approvalTools.includes(call.name)) return "allow";
+    if (approvals[call.id] !== undefined) return "allow";
+    return this.permissionMode === "ai" ? "ask-ai" : "ask-human";
   }
 
   /** 落一次运行存档；未启用存档时是空操作 */

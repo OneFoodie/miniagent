@@ -169,7 +169,15 @@ async function runSubagentOnce(
       deps.childRegistry(role),
       { ...deps.settings, maxIterations: call.maxIterations },
       bus,
-      { role },
+      {
+        role,
+        // 子 agent 沿用**所属 run** 的权限档位、审批器与白名单（从工具作用域取，见 runtime.ts）。
+        // 不这样做就会出现「主流程严格、子 agent 宽松」：子 agent 的工具调用会绕过父 run 的审批，
+        // 等于给了一条悄悄提权的旁路。作用域里没有（如单测直接调工具）时退回默认 manual。
+        permissionMode: scope?.permissionMode,
+        aiApprover: scope?.aiApprover,
+        allowlist: scope?.allowlist,
+      },
     );
     const result = await agent.run(call.task, [], context);
     return {

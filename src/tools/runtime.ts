@@ -2,11 +2,19 @@
 
 import type { EventBus } from "../core/events.js";
 import { makeEvent, EventType, toolScopeStorage } from "../core/events.js";
+import type { AllowlistLookup, PermissionMode, ToolApprover } from "../core/permission.js";
 import type { ToolCall, ToolResult } from "../core/types.js";
 import type { ToolRegistry } from "./registry.js";
 import { Semaphore } from "./semaphore.js";
 
 export type BatchResult = [string, ToolResult];
+
+/** 随工具作用域下传的运行级信息（供子 agent 沿用父 run 的档位与白名单） */
+export interface ToolRuntimeOptions {
+  permissionMode?: PermissionMode;
+  aiApprover?: ToolApprover;
+  allowlist?: AllowlistLookup;
+}
 
 export class ToolRuntime {
   private readonly semaphore: Semaphore;
@@ -15,6 +23,7 @@ export class ToolRuntime {
     private readonly registry: ToolRegistry,
     maxConcurrency = 8,
     private readonly defaultTimeout = 30,
+    private readonly options: ToolRuntimeOptions = {},
   ) {
     this.semaphore = new Semaphore(maxConcurrency);
   }
@@ -52,16 +61,18 @@ export class ToolRuntime {
         result = { ok: false, error: `工具 '${call.name}' 不存在` };
       } else {
         const tool = this.registry.get(call.name);
-        // 把当次总线与 runId 放进作用域：工具内部（典型是子 agent）据此把事件发回父轨迹，
-        // 否则子 agent 只能自建一条无人订阅的总线，中间步骤全丢
-        result = await toolScopeStorage.run({ bus, runId }, () =>
-          this.withTimeout(
-            tool.run(call.arguments, signal),
-            // 工具可自带超时（如子 agent 要跑很多轮），否则用运行时默认值
-            tool.timeoutSeconds ?? this.defaultTimeout,
-            call.name,
-            signal,
-          ),
+        // 把当次总线、runId 与权限档位放进作用域：工具内部（典型是子 agent）据此把事件发回父轨迹、
+        // 并沿用父 run 的档位；否则子 agent 只能自建一条无人订阅的总线，且会绕过审批
+        result = await toolScopeStorage.run(
+          { bus, runId, ...this.options },
+          () =>
+            this.withTimeout(
+              tool.run(call.arguments, signal),
+              // 工具可自带超时（如子 agent 要跑很多轮），否则用运行时默认值
+              tool.timeoutSeconds ?? this.defaultTimeout,
+              call.name,
+              signal,
+            ),
         );
       }
 

@@ -3,6 +3,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { LLMError } from "./errors.js";
+import type { AllowlistLookup, PermissionMode, ToolApprover } from "./permission.js";
 
 /** 通配订阅：接收所有事件 */
 export const WILDCARD = "*";
@@ -25,6 +26,8 @@ export const EventType = {
   MemoryWrite: "memory_write",
   /** 循环内上下文收紧：把早期工具结果折叠掉了多少 */
   ContextTrim: "context_trim",
+  /** AI 审批裁决：自动 AI 审批档下，某次工具调用被判放行或拒绝及理由 */
+  ApprovalAiVerdict: "approval_ai_verdict",
 } as const;
 
 export interface Event {
@@ -78,6 +81,15 @@ export class EventBus {
 export interface ToolScope {
   bus: EventBus;
   runId: string;
+  /**
+   * 本次运行的权限档位与 AI 审批器。子 agent 工具据此让子 agent 沿用父 run 的档位，
+   * 避免出现「主流程严格、子 agent 宽松」——否则子 agent 能绕过审批直接跑敏感工具。
+   * 只有普通工具用不到，故可选。
+   */
+  permissionMode?: PermissionMode;
+  aiApprover?: ToolApprover;
+  /** 同一份放行白名单：子 agent 也认父 run 已放行的命令，否则会被重复询问 */
+  allowlist?: AllowlistLookup;
 }
 
 /**

@@ -980,13 +980,214 @@ body::after {
 }
 
 .dock-hint {
-  max-width: 780px;
-  margin: 9px auto 0;
   font-family: var(--font-mono);
   font-size: 10.5px;
   letter-spacing: 0.8px;
   color: var(--muted);
-  text-align: center;
+}
+
+/* ---------------- 权限档位 ---------------- */
+
+.dock-meta {
+  max-width: 780px;
+  margin: 9px auto 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.perm-picker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 100px;
+  background: var(--bg-soft);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+}
+
+.perm-picker-label {
+  color: var(--muted);
+}
+
+.perm-picker select {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+}
+
+.perm-picker select:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.perm-picker option {
+  background: var(--panel);
+  color: var(--ink);
+}
+
+/* 完全访问是「没人把关」，用警示色标出来，避免它与前两档看起来一样 */
+.perm-picker.danger {
+  border-color: rgba(217, 119, 87, 0.45);
+}
+
+.perm-picker.danger select {
+  color: var(--rust);
+}
+
+/* ---------------- 审批卡片 ---------------- */
+
+.approval-card {
+  margin-top: 12px;
+  padding: 13px 15px;
+  border: 1px solid rgba(232, 163, 61, 0.4);
+  border-radius: 10px;
+  background: rgba(232, 163, 61, 0.06);
+}
+
+.approval-title {
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.6px;
+  color: var(--amber);
+}
+
+.approval-tool {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.approval-args {
+  margin: 7px 0 0;
+  padding: 9px 11px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.approval-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 11px;
+}
+
+.approval-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 100px;
+  background: var(--bg-soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.approval-btn:hover:not(:disabled) {
+  border-color: rgba(232, 163, 61, 0.5);
+}
+
+.approval-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-btn.primary {
+  color: #1a1306;
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+.approval-status {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.approval-status.error {
+  color: var(--rust);
+}
+
+/* AI 裁决：不打断人，所以用中性色，只在时间线上留一条记录备查 */
+.ai-verdict {
+  margin-top: 10px;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(125, 129, 117, 0.07);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ai-verdict.deny {
+  border-color: rgba(217, 119, 87, 0.3);
+  color: var(--rust);
+}
+
+/* ---------------- 已放行的命令 ---------------- */
+
+.allowlist-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.allowlist-row:last-child {
+  border-bottom: none;
+}
+
+.allowlist-main {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+  word-break: break-all;
+}
+
+.allowlist-tool {
+  color: var(--muted);
+}
+
+.allowlist-del {
+  flex-shrink: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 100px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.allowlist-del:hover {
+  color: var(--rust);
+  border-color: rgba(217, 119, 87, 0.4);
+}
+
+.allowlist-empty {
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* ---------------- 配置菜单 ---------------- */

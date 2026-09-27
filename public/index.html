@@ -99,7 +99,19 @@
             </svg>
           </button>
         </div>
-        <p class="dock-hint">工具在沙箱内执行 · 过程事件实时可见</p>
+        <!-- 权限档位：把「现在能干什么、谁来把关」显式化。
+             原来这里写的是「工具在沙箱内执行」，但那只对文件工具成立——shell 工具根本没有沙箱。 -->
+        <div class="dock-meta">
+          <label class="perm-picker">
+            <span class="perm-picker-label">权限</span>
+            <select id="permissionMode">
+              <option value="manual">手动审批</option>
+              <option value="ai">自动AI审批</option>
+              <option value="full">完全访问</option>
+            </select>
+          </label>
+          <span class="dock-hint" id="permissionHint"></span>
+        </div>
       </div>
     </main>
 

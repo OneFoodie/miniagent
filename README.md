@@ -73,7 +73,7 @@ npm start                     # → http://localhost:3000
 | `MINIAGENT_SHELL_MODE` | `readonly` | 通用执行通道档位：`off` / `readonly`（只读）/ `full`（旧名 `MINIAGENT_POWERSHELL_MODE` 仍可用） |
 | `MINIAGENT_SHELL_TIMEOUT` | `30` | 单条 shell 命令的默认超时（秒）；单次可用 `timeout_seconds` 调大，full 档上限 300s |
 | `MINIAGENT_SHELL_EXECUTABLE` | 空 | 覆盖可执行文件：Windows 默认 `powershell`、其它平台默认 `bash` |
-| `MINIAGENT_APPROVAL_TOOLS` | 空 | 需要人工审批的工具名（逗号分隔），命中即挂起等人批 |
+| `MINIAGENT_APPROVAL_TOOLS` | 空 | 哪些工具算「敏感」（逗号分隔）。**谁来批**由界面上的权限档位决定，见下一节 |
 | `MINIAGENT_MCP_CONFIG` | `./mcp.json` | MCP 服务端配置；文件不存在则不加载 MCP SDK |
 | `MINIAGENT_SKILLS_DIR` | `./skills` | 技能包目录；模型可用 `create_skill` 往里写新技能 |
 | `MINIAGENT_OTEL_ENABLED` | `false` | 是否按 GenAI 语义约定发 OTLP（span + 指标） |
@@ -184,8 +184,8 @@ POSIX 的 `readonly` 还有个使用上的代价：**通配符不展开**——`
 所以磁盘上只留「确实需要人看一眼」的运行。
 
 ```bash
-# 需要审批的工具：命中即暂停，不执行
-MINIAGENT_APPROVAL_TOOLS=write_file
+# 哪些工具算「敏感」：命中就走审批流程
+MINIAGENT_APPROVAL_TOOLS=shell
 
 # CLI：列出可续跑的运行 / 接着跑
 你 > /runs
@@ -193,12 +193,41 @@ MINIAGENT_APPROVAL_TOOLS=write_file
 
 # HTTP：列运行、写审批决定、再续跑（两步之间进程重启也不丢决定）
 curl localhost:3000/api/runs
-curl -X POST localhost:3000/api/approve -d '{"run_id":"...","approved":true}'
+curl -X POST localhost:3000/api/approve -H 'X-Admin-Token: ...' \
+     -d '{"run_id":"...","approved":true,"remember":false}'
 curl -X POST localhost:3000/api/chat    -d '{"message":"","resume_run_id":"..."}'
 ```
 
 审批以**整批**为单位：同一批工具基于同一份判断发起，批准一个而偷跑另一个没有意义。
 被拒的调用不执行，但会把「用户拒绝」作为工具结果回灌，让模型改走别的路。
+
+### 谁来批：三档权限（界面右下角的下拉）
+
+`MINIAGENT_APPROVAL_TOOLS` 只决定**哪些工具算敏感**；**谁来决定要不要执行**由会话里的权限档位决定：
+
+| 档位 | shell 档位 | 谁裁决 | 效果 |
+|---|---|---|---|
+| **手动审批**（默认） | `full` | 人 | 每条敏感命令挂起，等你在卡片上点「批准 / 拒绝 / 批准并加入白名单」 |
+| **自动AI审批** | `full` | AI | AI 全权裁决，不打扰你 |
+| **完全访问** | `full` | 无人 | 直接执行 |
+
+三档统一用 `shell=full`——因为 `readonly` 的校验发生在**执行时**、审批发生在**执行前**，
+所以只读档下不在白名单里的命令会被直接拒掉、根本到不了审批卡片。只读仍可在配置菜单里单独设。
+
+**「自动AI审批」是便利层，不是安全防线。** AI 说行就跑，判错的后果没人拦。
+每次裁决的理由都会写进轨迹、也在时间线上留一条，供事后核对。
+AI 调用失败时**按拒绝处理**（不降级成问人，也不放行），并把「审批服务不可用」回灌给模型让它换路。
+
+**档位需要管理令牌**：非默认档要向 `/api/chat` 带 `X-Admin-Token`，服务端会校验。
+未配置令牌时下拉锁定在「手动审批」——否则公网实例上任何访客都能一键给自己开「完全访问」。
+切到非默认档时界面会**同时把执行通道切到 `full`**（否则档位开了也跑不动），并在下拉下方明示这一点。
+
+### 放行名单
+
+审批卡片上的「批准并加入白名单」会把**这条命令**（工具名 + 完整参数）记进
+`approvals/allowlist.jsonl`，以后同样的命令不再询问；可在配置菜单的「已放行的命令」里逐条撤回。
+粒度是精确匹配：放行了 `date`，`date -u` 仍会问。`shell` 的 `timeout_seconds` 不参与匹配——
+它是执行细节而非「要做什么」，否则同一个命令会因超时参数不同被要求放行两次。
 
 ## MCP 工具
 

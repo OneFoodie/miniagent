@@ -25,6 +25,8 @@ coverage/
 /memory/
 # 运行存档：只留中断/挂起的运行，属于本机产物
 /checkpoints/
+# 审批放行名单：运行期状态（放行了哪些命令），不是配置
+/approvals/
 
 # 向量知识库：索引文件 + 模型缓存 + 模型本体（体积大，用 npm run model:fetch 重建）
 /vector-db/

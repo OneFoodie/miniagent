@@ -123,6 +123,14 @@ export interface Settings {
    * 适合放「有副作用且不可撤销」的工具，如写文件、发请求。
    */
   approvalTools: string[];
+  /**
+   * 命令级放行白名单的落盘文件（JSONL，一行一条）。
+   *
+   * 它**不是配置而是运行期状态**：由网页端「批准并加入白名单」写入、可在配置菜单里撤回，
+   * 与 history/、memory/、checkpoints/ 同类。之所以仍从环境变量读，只是为了与
+   * 其余运行目录的定位方式保持一致、并允许部署时改路径。
+   */
+  approvalAllowlistFile: string;
 
   /** 技能包目录 */
   skillsDir: string;
@@ -390,6 +398,10 @@ export function loadSettings(): Settings {
     checkpointDir: readString("MINIAGENT_CHECKPOINT_DIR", "./checkpoints"),
     checkpointEnabled: readBoolean("MINIAGENT_CHECKPOINT_ENABLED", true),
     approvalTools: readApprovalTools(),
+    approvalAllowlistFile: readString(
+      "MINIAGENT_APPROVAL_ALLOWLIST_FILE",
+      "./approvals/allowlist.jsonl",
+    ),
     skillsDir: readString("MINIAGENT_SKILLS_DIR", "./skills"),
     mcpConfigPath: readString("MINIAGENT_MCP_CONFIG", "./mcp.json"),
     historyDir: readString("MINIAGENT_HISTORY_DIR", "./history"),
