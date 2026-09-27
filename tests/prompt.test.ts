@@ -124,6 +124,18 @@ describe("PromptBuilder", () => {
     expect(withoutTool).not.toContain("固化成技能");
   });
 
+  it("注册了 ask_user 才提示「只有用户才知道的事就问出来」，否则不提", () => {
+    const withTool = createDefaultPromptBuilder().build({
+      ...baseContext,
+      toolNames: ["ask_user"],
+    }).text;
+    expect(withTool).toContain("ask_user");
+    expect(withTool).toContain("不要替用户假设");
+
+    const withoutTool = createDefaultPromptBuilder().build(baseContext).text;
+    expect(withoutTool).not.toContain("ask_user");
+  });
+
   it("能写文件时才教「写脚本再执行」这条工作法，并点明本平台 python 的坑", () => {
     // 只给 shell 不给 write_file 时，模型没有落脚本的地方，提这条只会引导它去乱写
     const full = createDefaultPromptBuilder().build({

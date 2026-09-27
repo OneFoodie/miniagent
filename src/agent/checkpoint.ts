@@ -26,6 +26,29 @@ export interface PendingApproval {
   arguments: Record<string, unknown>;
 }
 
+/** 等待用户回答的工具调用（`ask_user`）。形状与 PendingApproval 相同，语义不同 */
+export interface PendingQuestion {
+  callId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+}
+
+/** 单个问题的作答：题干 + 选中的标签 + 自由输入 */
+export interface AskAnswerItem {
+  question: string;
+  /** 选中的选项标签；选「其他」时也可以为空数组 */
+  selected: string[];
+  /** 用户自己填的内容（「其他」输入框） */
+  other?: string;
+}
+
+/** 一整次提问（一张卡片）的作答 */
+export interface AskAnswer {
+  answers: AskAnswerItem[];
+  /** 用户整卡跳过：什么都没选，让模型自己往下走 */
+  skipped?: boolean;
+}
+
 /** 一次运行的可恢复现场 */
 export interface RunCheckpoint {
   runId: string;
@@ -58,6 +81,16 @@ export interface RunCheckpoint {
   approvals: Record<string, boolean>;
   /** 当前等待决定的调用；为空表示是「中断后待续跑」而不是「等审批」 */
   pendingApproval?: PendingApproval;
+  /**
+   * 已收到的用户回答：callId → 答案。
+   *
+   * 与 `approvals` 一样**每次存档都要带上**，不能只在挂起时写：一批里模型可能同时问两件事，
+   * 第一次作答后第二次才挂起，这时必须记得第一次的答案，否则再续跑会把它当没答过、重问一遍。
+   * 可选是为了兼容加这个字段之前写下的存档。
+   */
+  answers?: Record<string, AskAnswer>;
+  /** 当前等待回答的调用；为空表示不是「等回答」状态 */
+  pendingQuestion?: PendingQuestion;
 }
 
 /** 列表用的摘要（不返回消息体，避免列表接口变重） */
@@ -67,6 +100,7 @@ export interface CheckpointSummary {
   updatedAt: number;
   iterations: number;
   pendingApproval?: PendingApproval;
+  pendingQuestion?: PendingQuestion;
 }
 
 /** runId 会直接进文件名，必须限制字符集以防路径穿越 */
@@ -126,6 +160,7 @@ export async function listCheckpoints(dir: string): Promise<CheckpointSummary[]>
       updatedAt: checkpoint.updatedAt,
       iterations: checkpoint.iterations,
       pendingApproval: checkpoint.pendingApproval,
+      pendingQuestion: checkpoint.pendingQuestion,
     });
   }
   return summaries.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -159,4 +194,24 @@ export async function recordApproval(
   checkpoint.approvals = { ...checkpoint.approvals, [callId]: approved };
   await saveCheckpoint(dir, checkpoint);
   return checkpoint.pendingApproval;
+}
+
+/**
+ * 把一个用户回答写回存档。
+ *
+ * 与 `recordApproval` 同样的理由：前端先 POST 回答，再带着 resume_run_id 重连续跑，
+ * 两次请求之间进程可能重启，所以回答必须落盘。
+ */
+export async function recordAnswer(
+  dir: string,
+  runId: string,
+  answer: AskAnswer,
+): Promise<PendingQuestion | undefined> {
+  const checkpoint = await loadCheckpoint(dir, runId);
+  if (!checkpoint?.pendingQuestion) return undefined;
+
+  const callId = checkpoint.pendingQuestion.callId;
+  checkpoint.answers = { ...checkpoint.answers, [callId]: answer };
+  await saveCheckpoint(dir, checkpoint);
+  return checkpoint.pendingQuestion;
 }

@@ -28,6 +28,10 @@ export const EventType = {
   ContextTrim: "context_trim",
   /** AI 审批裁决：自动 AI 审批档下，某次工具调用被判放行或拒绝及理由 */
   ApprovalAiVerdict: "approval_ai_verdict",
+  /** 向用户提问：模型调用 ask_user，运行在此挂起等回答 */
+  QuestionAsked: "question_asked",
+  /** 用户已回答：把回答作为工具结果回灌进消息序列 */
+  QuestionAnswered: "question_answered",
 } as const;
 
 export interface Event {

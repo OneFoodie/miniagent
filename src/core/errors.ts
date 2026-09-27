@@ -65,3 +65,22 @@ export class ApprovalRequiredError extends MiniAgentError {
     this.name = "ApprovalRequiredError";
   }
 }
+
+/**
+ * 运行挂在「等待用户回答」上（`ask_user` 工具被调用且尚无回答）。
+ *
+ * 与 ApprovalRequiredError 完全同构：**这不是失败**，而是一次可继续的暂停。
+ * 现场已经写进 checkpoint，拿到回答后用 `Agent.resume()` 接着跑即可。
+ */
+export class QuestionRequiredError extends MiniAgentError {
+  constructor(
+    message: string,
+    /** 本次运行的 id，用于恢复 */
+    readonly runId: string,
+    /** 等待回答的工具调用 */
+    readonly call: { id: string; name: string; arguments: Record<string, unknown> },
+  ) {
+    super(message);
+    this.name = "QuestionRequiredError";
+  }
+}

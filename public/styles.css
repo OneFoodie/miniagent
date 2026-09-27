@@ -1141,6 +1141,124 @@ body::after {
   color: var(--rust);
 }
 
+/* ---------------- 提问卡片（ask_user） ----------------
+   与审批卡片同一位置、同一套按钮样式，但用 sage 而不是 amber：
+   审批是「要放行一个动作」，提问只是「问一件事」，两者视觉上应当分得开。 */
+
+.question-card {
+  margin-top: 12px;
+  padding: 13px 15px;
+  border: 1px solid rgba(131, 192, 154, 0.35);
+  border-radius: 10px;
+  background: rgba(131, 192, 154, 0.05);
+}
+
+.question-title {
+  margin: 0 0 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.6px;
+  color: var(--sage);
+}
+
+.question-block + .question-block {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+.question-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.question-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 100px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* 整行可点：把 input 包在 label 里，点文字与点框等效 */
+.question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  cursor: pointer;
+}
+
+.question-option:hover {
+  border-color: rgba(131, 192, 154, 0.45);
+}
+
+.question-option input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  accent-color: var(--sage);
+  cursor: pointer;
+}
+
+.question-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.question-option-label {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.question-option-desc {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.question-other {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.question-other input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+}
+
+.question-other input:focus {
+  outline: none;
+  border-color: rgba(131, 192, 154, 0.5);
+}
+
 /* ---------------- 已放行的命令 ---------------- */
 
 .allowlist-row {
@@ -1219,25 +1337,106 @@ body::after {
   color: var(--ink-soft);
 }
 
-.config-wrap {
-  position: relative;
+/* ---------------- 配置入口与弹窗 ---------------- */
+
+/* 左下角悬浮按钮。窄屏时输入坞几乎占满宽度，由 .dock-wrap 让位（见响应式段） */
+.config-fab {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 100px;
+  background: var(--panel);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.2s ease, color 0.2s ease;
 }
 
-.config-panel {
-  position: absolute;
-  top: calc(100% + 10px);
-  right: 0;
-  z-index: 21;
-  width: 430px;
-  max-height: 70vh;
-  overflow-y: auto;
-  padding: 14px 16px 16px;
+.config-fab:hover,
+.config-fab[aria-expanded="true"] {
+  border-color: rgba(232, 163, 61, 0.5);
+  color: var(--ink);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 8, 7, 0.62);
+  backdrop-filter: blur(3px);
+}
+
+/* 宽高自适应：宽按视口给上限，高按内容给上限（内容少时不撑满） */
+.modal {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, 100%);
+  max-height: min(86vh, 100%);
   border: 1px solid var(--line-strong);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--panel);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.modal-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 15px 18px 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h2 {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.modal-close {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.modal-close:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+/* min-height: 0 不能省：flex 子项默认 min-height:auto，会按内容撑开、把自己顶出容器，
+   于是滚动条跑到 .modal 上、上面那句 max-height 就形同虚设 */
+.config-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 18px;
   font-size: 12px;
   color: var(--ink-soft);
+}
+
+/* 打开弹窗时会把焦点移到内容区（为读屏与键盘），但不该画出一圈焦点框 */
+.config-panel:focus {
+  outline: none;
 }
 
 .config-panel h3 {
@@ -1338,6 +1537,12 @@ body::after {
 
 /* ---------------- 响应式 ---------------- */
 
+/* 窄屏时输入坞几乎占满宽度，会与左下角的悬浮按钮重叠。
+   给它让出 62px，而不是靠 z-index 把按钮盖在输入框上——盖上去会让左下角那块 textarea 点不到。 */
+@media (max-width: 900px) {
+  .dock-wrap { padding-left: 62px; }
+}
+
 @media (max-width: 640px) {
   .topbar { padding: 14px 18px; }
   .brand-text p { display: none; }
@@ -1349,7 +1554,19 @@ body::after {
   .step-args { max-width: 160px; }
   /* 窄屏上顶栏放不下，会话标识先让位（历史面板里仍能看出当前是哪个会话） */
   .session-badge { display: none; }
-  .config-panel { width: calc(100vw - 36px); }
+  /* 手机上全屏化比挤一个小窗好用 */
+  .modal-backdrop { padding: 0; }
+  .modal {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border: none;
+    border-radius: 0;
+  }
+  /* 输入坞回到通栏，悬浮按钮收成圆钮，让它多占一点左边距 */
+  .dock-wrap { padding-left: 58px; }
+  .config-fab { left: 12px; bottom: 14px; padding: 10px; }
+  .config-fab-text { display: none; }
   .config-field > label { flex: 0 0 96px; }
   .config-hint { margin-left: 106px; }
 }

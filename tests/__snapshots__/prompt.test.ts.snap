@@ -57,7 +57,7 @@ exports[`PromptBuilder > 默认提示词全文与段版本快照（改动段内�
 [
   "identity@1.0.0",
   "principles@1.2.0",
-  "tool_policy@1.9.0",
+  "tool_policy@1.10.0",
   "progress@1.0.0",
   "skills_catalog@1.0.0",
   "memory_summary@1.0.0",

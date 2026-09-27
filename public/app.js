@@ -18,9 +18,10 @@ const historyWrap = document.querySelector(".history-wrap");
 const historyBtn = document.querySelector("#historyBtn");
 const historyPanel = document.querySelector("#historyPanel");
 const newChatBtn = document.querySelector("#newChatBtn");
-const configWrap = document.querySelector(".config-wrap");
 const configBtn = document.querySelector("#configBtn");
 const configPanel = document.querySelector("#configPanel");
+const configModal = document.querySelector("#configModal");
+const configCloseBtn = document.querySelector("#configCloseBtn");
 const sessionBadge = document.querySelector("#sessionBadge");
 const sessionTitle = document.querySelector("#sessionTitle");
 const permissionMode = document.querySelector("#permissionMode");
@@ -197,6 +198,10 @@ function createAssistantCard(container, userMessage) {
   let runId = null;
   /** 审批条（同一时刻只可能有一个待批调用，因为挂起是整批挂起） */
   let approvalEl = null;
+  /** 提问卡片：与审批同理，同一时刻只可能有一个待回答的提问 */
+  let questionEl = null;
+  /** 回答提交后卡片要收敛成一句摘要，内容在这里攒好 */
+  let questionSummary = "";
 
   return {
     /** run_started 到达时记录，供"原始轨迹"按钮读取 */
@@ -424,6 +429,196 @@ function createAssistantCard(container, userMessage) {
     setApprovalStatus(message, isError = false) {
       if (!approvalEl) return;
       const status = approvalEl.querySelector(".approval-status");
+      if (!status) return;
+      status.className = isError ? "approval-status error" : "approval-status";
+      status.textContent = message;
+    },
+
+    /**
+     * 渲染提问卡片并把「等用户选完」表达成一个 Promise（与 askApproval 同一套路）。
+     *
+     * 返回 resolve(答案) / resolve(null)（用户点了跳过）。
+     * 单选/多选由模型给的 multiple 决定；每题都带一个「其他」输入框——选项是模型的猜测，
+     * 猜不中时用户得能直接写。单选下选了选项就清空「其他」，避免「既选了 A 又写了 B」这种自相矛盾的答案。
+     */
+    askQuestion(info) {
+      this.finish();
+      questionEl = document.createElement("div");
+      questionEl.className = "question-card";
+
+      const title = document.createElement("p");
+      title.className = "question-title";
+      title.textContent = "需要你确认";
+      questionEl.appendChild(title);
+
+      const questions = Array.isArray(info.questions) ? info.questions : [];
+      // 每题一份作答状态：选中的标签集合 + 那个「其他」输入框
+      const state = questions.map((item) => ({
+        multiple: item.multiple === true,
+        selected: new Set(),
+        otherInput: null,
+      }));
+
+      const status = document.createElement("span");
+      status.className = "approval-status";
+      const submit = document.createElement("button");
+      submit.type = "button";
+      submit.className = "approval-btn primary";
+      submit.textContent = "提交";
+      // 每题都要有答案（选了选项或填了「其他」）才让提交；跳过始终可点
+      const refreshSubmit = () => {
+        submit.disabled = !questions.every(
+          (_, index) =>
+            state[index].selected.size > 0 ||
+            (state[index].otherInput?.value.trim() ?? "") !== "",
+        );
+      };
+
+      questions.forEach((item, index) => {
+        const block = document.createElement("div");
+        block.className = "question-block";
+
+        const text = document.createElement("p");
+        text.className = "question-text";
+        text.textContent = item.question;
+        const tag = document.createElement("span");
+        tag.className = "question-tag";
+        tag.textContent = state[index].multiple ? "可多选" : "单选";
+        text.appendChild(tag);
+        block.appendChild(text);
+
+        const optionList = document.createElement("div");
+        optionList.className = "question-options";
+        // 同组同名：单选靠它互斥，不需要自己维护 radio 的勾选状态
+        const groupName = `q_${info.call_id}_${index}`;
+        for (const option of item.options ?? []) {
+          const row = document.createElement("label");
+          row.className = "question-option";
+          const box = document.createElement("input");
+          box.type = state[index].multiple ? "checkbox" : "radio";
+          box.name = groupName;
+          box.value = option.label;
+
+          const body = document.createElement("span");
+          body.className = "question-option-body";
+          const label = document.createElement("span");
+          label.className = "question-option-label";
+          label.textContent = option.label;
+          body.appendChild(label);
+          if (option.description) {
+            const desc = document.createElement("span");
+            desc.className = "question-option-desc";
+            desc.textContent = option.description;
+            body.appendChild(desc);
+          }
+
+          box.addEventListener("change", () => {
+            const current = state[index];
+            if (current.multiple) {
+              if (box.checked) current.selected.add(option.label);
+              else current.selected.delete(option.label);
+            } else {
+              current.selected.clear();
+              current.selected.add(option.label);
+              if (current.otherInput) current.otherInput.value = "";
+            }
+            refreshSubmit();
+          });
+
+          row.append(box, body);
+          optionList.appendChild(row);
+        }
+        block.appendChild(optionList);
+
+        const otherRow = document.createElement("label");
+        otherRow.className = "question-other";
+        const otherText = document.createElement("span");
+        otherText.textContent = "其他";
+        const otherInput = document.createElement("input");
+        otherInput.type = "text";
+        otherInput.placeholder = "选项都不合适时自己写";
+        otherInput.addEventListener("input", () => {
+          // 单选下写了「其他」就取消同组的选择；多选下两者可以并存（既要 A 又要补充说明）
+          if (!state[index].multiple && otherInput.value.trim()) {
+            state[index].selected.clear();
+            for (const box of optionList.querySelectorAll("input")) box.checked = false;
+          }
+          refreshSubmit();
+        });
+        state[index].otherInput = otherInput;
+        otherRow.append(otherText, otherInput);
+        block.appendChild(otherRow);
+
+        questionEl.appendChild(block);
+      });
+
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+      const skip = document.createElement("button");
+      skip.type = "button";
+      skip.className = "approval-btn";
+      skip.textContent = "跳过";
+      actions.append(submit, skip, status);
+      questionEl.appendChild(actions);
+      card.appendChild(questionEl);
+      scrollCardIntoView(questionEl);
+      refreshSubmit();
+
+      return new Promise((resolve) => {
+        const freeze = (message) => {
+          submit.disabled = true;
+          skip.disabled = true;
+          for (const box of questionEl.querySelectorAll("input")) box.disabled = true;
+          status.className = "approval-status";
+          status.textContent = message;
+        };
+
+        submit.addEventListener("click", () => {
+          const answers = questions.map((item, index) => {
+            const current = state[index];
+            const other = current.otherInput?.value.trim() ?? "";
+            return {
+              question: item.question,
+              selected: [...current.selected],
+              ...(other ? { other } : {}),
+            };
+          });
+          questionSummary = `你的回答：${answers
+            .map((item) => [...item.selected, item.other].filter(Boolean).join("、"))
+            .join("；")}`;
+          freeze("已提交，继续中…");
+          resolve({ answers });
+        });
+
+        skip.addEventListener("click", () => {
+          questionSummary = "已跳过这个问题，交给模型自行判断";
+          freeze("已跳过，继续中…");
+          resolve(null);
+        });
+      });
+    },
+
+    /** 回答已生效，把卡片收敛成一句静态摘要，让时间线接着往下走 */
+    clearQuestion() {
+      if (questionEl) questionEl.remove();
+      questionEl = null;
+      if (questionSummary) {
+        const note = document.createElement("div");
+        note.className = "ai-verdict";
+        note.textContent = questionSummary;
+        // 插在答案区**之前**：答案是这一轮的产出，理应排在「你的回答」下面。
+        // 直接 append 到卡片末尾的话，续跑产出的答案（固定落在 .answer 里）会排在摘要**上面**，
+        // 于是摘要反被挤到最后一行，读起来像问答倒过来了。
+        card.insertBefore(note, answerEl);
+        questionSummary = "";
+      }
+      scrollToBottom();
+    },
+
+    /** 提交回答失败时把原因写在卡片里（此时卡片还留着，方便用户重试） */
+    setQuestionStatus(message, isError = false) {
+      if (!questionEl) return;
+      const status = questionEl.querySelector(".approval-status");
       if (!status) return;
       status.className = isError ? "approval-status error" : "approval-status";
       status.textContent = message;
@@ -899,14 +1094,22 @@ function configRequest(init = {}) {
 }
 
 async function toggleConfigPanel() {
-  if (!configPanel.hidden) {
+  if (!configModal.hidden) {
     closeConfigPanel();
     return;
   }
-  configPanel.hidden = false;
-  configBtn.setAttribute("aria-expanded", "true");
-  configPanel.textContent = "加载中…";
+  openConfigPanel();
   await loadConfigPanel();
+}
+
+/** 打开弹窗：解除 hidden、锁住页面滚动、把焦点移进弹窗 */
+function openConfigPanel() {
+  configModal.hidden = false;
+  configBtn.setAttribute("aria-expanded", "true");
+  // 锁滚动：否则滚轮会带动背后的时间线，看起来像「弹窗在飘」
+  document.body.style.overflow = "hidden";
+  configPanel.textContent = "加载中…";
+  configPanel.focus({ preventScroll: true });
 }
 
 async function loadConfigPanel() {
@@ -1340,22 +1543,33 @@ async function saveConfig(button) {
   }
 }
 
+/** 关闭弹窗：还原滚动、还焦点给左下角的入口按钮 */
 function closeConfigPanel() {
-  configPanel.hidden = true;
+  configModal.hidden = true;
   configBtn.setAttribute("aria-expanded", "false");
+  document.body.style.overflow = "";
+  configBtn.focus({ preventScroll: true });
 }
 
 configBtn.addEventListener("click", () => void toggleConfigPanel());
+configCloseBtn.addEventListener("click", () => closeConfigPanel());
 
 /**
- * 拦掉面板内部的点击，不让它冒泡到 document 的「点击外部收起」监听。
+ * 点遮罩关闭：判据是「点击的目标正是遮罩本身」。
  *
- * 不加这行会有一个很隐蔽的 bug（已实测）：面板里有些按钮在处理函数里**同步**替换
- * configPanel.innerHTML（如「保存令牌并重试」先显示"加载中…"），按钮在事件冒泡到
- * document 之前就已经从 DOM 上摘掉了；此时 configWrap.contains(event.target) 变成
- * false，于是被误判为「点了面板外面」，面板刚点完就自动收起。
+ * 这里刻意不用早先那套「点击不在容器内就收起」的写法。那套写法需要额外给容器挂一个
+ * stopPropagation（因为面板里有按钮会在处理函数里同步替换 innerHTML，按钮在事件冒泡到
+ * document 之前就已经从 DOM 上摘掉了，contains 于是变 false，面板刚点完就自动收起）。
+ * 现在被摘掉的永远是 .modal 的后代，event.target 仍是那个按钮、不等于遮罩，那个 hack 也就不必要了。
  */
-configWrap.addEventListener("click", (event) => event.stopPropagation());
+configModal.addEventListener("click", (event) => {
+  if (event.target === configModal) closeConfigPanel();
+});
+
+// Esc 关闭：弹窗开着时才拦，免得影响输入框里的其它按键
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !configModal.hidden) closeConfigPanel();
+});
 
 /** 当天只显示时分，更早的显示月日 */
 function formatTime(seconds) {
@@ -1369,11 +1583,8 @@ function formatTime(seconds) {
 historyBtn.addEventListener("click", () => void toggleHistoryPanel());
 newChatBtn.addEventListener("click", () => startNewChat());
 
-// 点击面板外部时收起
+// 历史面板仍是下拉，点它外面收起；配置菜单已经改成弹窗，自己有遮罩与 Esc 两条关闭路径
 document.addEventListener("click", (event) => {
-  if (!configPanel.hidden && configWrap && !configWrap.contains(event.target)) {
-    closeConfigPanel();
-  }
   if (historyPanel.hidden) return;
   if (historyWrap && historyWrap.contains(event.target)) return;
   closeHistoryPanel();
@@ -1423,9 +1634,36 @@ async function sendApprovalDecision(runId, decision) {
 }
 
 /**
- * 跑一轮：流式对话 →（可能）撞上审批 → 拿到决定 → 续跑，直到没有待批。
+ * 提交一次对 ask_user 的回答。`answer` 为 null 表示用户点了跳过。
  *
- * 为什么要单独一层循环：一次运行可能连续挂起多轮（每轮批一个工具），
+ * 与审批同理，回答必须先落盘（服务端 `recordAnswer`），因为「提交回答」与「续跑」是两次请求。
+ * 这个接口**不需要管理令牌**：回答只是把用户的话交给模型，不放大任何权限。
+ */
+async function sendAnswer(runId, answer) {
+  try {
+    const response = await fetch("/api/answer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        answer === null
+          ? { run_id: runId, skipped: true }
+          : { run_id: runId, answers: answer.answers },
+      ),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return { ok: false, error: data.error ?? `HTTP ${response.status}` };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: `提交回答失败：${error.message}` };
+  }
+}
+
+/**
+ * 跑一轮：流式对话 →（可能）撞上审批或提问 → 拿到决定/回答 → 续跑，直到不再挂起。
+ *
+ * 为什么要单独一层循环：一次运行可能连续挂起多轮（每轮批一个工具、或问一件事），
  * 而且续跑必须**接回同一张卡片**——另开一张卡会把一次问答拆成几段，
  * 时间线与最终答案都散掉了。
  */
@@ -1434,6 +1672,22 @@ async function runTurn(message, card) {
   let payload = message;
   for (;;) {
     const outcome = await streamChat(payload, card, resumeRunId);
+
+    if (outcome.kind === "question") {
+      const info = outcome.info;
+      const answer = await card.askQuestion(info);
+      const sent = await sendAnswer(info.run_id, answer);
+      if (!sent.ok) {
+        // 卡片留在原地，把原因写在它内部，方便用户重试
+        card.setQuestionStatus(sent.error, true);
+        return;
+      }
+      card.clearQuestion();
+      resumeRunId = info.run_id;
+      payload = "";
+      continue;
+    }
+
     if (outcome.kind !== "approval") return;
 
     const info = outcome.info;
@@ -1554,6 +1808,9 @@ async function streamChat(message, card, resumeRunId = null) {
           // 这里**直接返回**而不是继续读：服务端在发完这个事件后就是 done，
           // 站在流里等用户点击只会白白占着一个 reader。
           return { kind: "approval", info: parsed.data };
+        case "question_required":
+          // 挂起等回答：同一个道理，把选择权交给 runTurn
+          return { kind: "question", info: parsed.data };
         case "error":
           // 状态点的重置统一交给 submit 的 finally 处理
           if (parsed.data.cancelled) {
@@ -1689,4 +1946,21 @@ function degradeDiagram(node, error) {
 
 function scrollToBottom() {
   thread.scrollTop = thread.scrollHeight;
+}
+
+/**
+ * 让一张卡片尽量完整地出现在视野里。
+ *
+ * 提问卡片可以比可视区还高——两题、每题五六个带说明的选项就有八百多像素。
+ * 这时「钉到底」恰好会把标题与第一题推到屏幕外，用户看到的是一张没头没尾的卡片
+ * （实测踩到过）。所以装不下时改为把卡片顶部对齐到可视区顶部，剩下的往下滚就是。
+ */
+function scrollCardIntoView(el) {
+  const fits = el.offsetHeight <= thread.clientHeight - 24;
+  if (fits) {
+    scrollToBottom();
+    return;
+  }
+  thread.scrollTop +=
+    el.getBoundingClientRect().top - thread.getBoundingClientRect().top - 12;
 }

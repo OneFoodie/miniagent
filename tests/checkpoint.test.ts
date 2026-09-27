@@ -16,6 +16,7 @@ import { Agent } from "../src/agent/agent.js";
 import {
   listCheckpoints,
   loadCheckpoint,
+  recordAnswer,
   recordApproval,
   removeCheckpoint,
   saveCheckpoint,
@@ -134,6 +135,41 @@ describe("运行存档的读写", () => {
     const call = await recordApproval(dir, "run_c", false);
     expect(call?.callId).toBe("c1");
     expect((await loadCheckpoint(dir, "run_c"))?.approvals).toEqual({ c1: false });
+  });
+
+  it("记录用户回答会落盘，且没有待答项时返回 undefined", async () => {
+    const dir = await tempDir();
+    await saveCheckpoint(dir, {
+      ...checkpoint("run_q"),
+      pendingQuestion: { callId: "q1", tool: "ask_user", arguments: {} },
+    });
+
+    const question = await recordAnswer(dir, "run_q", {
+      answers: [{ question: "选哪个？", selected: ["A"] }],
+    });
+    expect(question?.callId).toBe("q1");
+    expect((await loadCheckpoint(dir, "run_q"))?.answers?.q1).toEqual({
+      answers: [{ question: "选哪个？", selected: ["A"] }],
+    });
+
+    // 待批的运行里没有待答项：别把回答写错地方
+    await saveCheckpoint(dir, {
+      ...checkpoint("run_a"),
+      pendingApproval: { callId: "c1", tool: "calculator", arguments: {} },
+    });
+    expect(await recordAnswer(dir, "run_a", { answers: [], skipped: true })).toBeUndefined();
+  });
+
+  it("列表带出待答项，用于显示「这次在等人回答」", async () => {
+    const dir = await tempDir();
+    await saveCheckpoint(dir, {
+      ...checkpoint("run_q"),
+      pendingQuestion: { callId: "q1", tool: "ask_user", arguments: {} },
+    });
+
+    const list = await listCheckpoints(dir);
+    expect(list[0]!.pendingQuestion?.callId).toBe("q1");
+    expect(list[0]!.pendingApproval).toBeUndefined();
   });
 });
 

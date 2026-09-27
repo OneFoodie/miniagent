@@ -2,6 +2,7 @@
 
 import type { Settings } from "../../core/config.js";
 import type { ToolRegistry } from "../registry.js";
+import { askUser } from "./askUser.js";
 import { calculator } from "./calculator.js";
 import { httpFetch } from "./httpFetch.js";
 import { registerFileTools } from "./files.js";
@@ -16,6 +17,8 @@ export async function registerBuiltins(
   registry.register(calculator);
   registry.register(httpFetch);
   registry.register(webSearch);
+  // 会话内提问：挂起等用户选择。它不是敏感工具（不执行外部动作），不进审批名单
+  registry.register(askUser);
   await registerFileTools(registry, settings.workspace);
   // 通用执行通道：无沙箱，是否注册、放行到什么程度由权限档位决定（默认 readonly）
   await registerShell(registry, settings);

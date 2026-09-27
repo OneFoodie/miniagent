@@ -9,6 +9,7 @@ import {
   AgentLimitError,
   ApprovalRequiredError,
   MiniAgentError,
+  QuestionRequiredError,
 } from "../core/errors.js";
 import { makeEvent, EventBus, EventType } from "../core/events.js";
 import { getLogger, runIdStorage } from "../core/logging.js";
@@ -21,6 +22,7 @@ import type { SummaryMemory } from "../memory/summary.js";
 import type { PromptBuilder } from "../prompts/builder.js";
 import { promptBuilderForRole, type RolePreset } from "../prompts/roles.js";
 import type { SkillRegistry } from "../skills/loader.js";
+import { ASK_USER_TOOL_NAME, parseAskQuestions, type AskQuestion } from "../tools/builtins/askUser.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { ToolRuntime } from "../tools/runtime.js";
 import {
@@ -28,6 +30,7 @@ import {
   recordApproval,
   removeCheckpoint,
   saveCheckpoint,
+  type AskAnswer,
 } from "./checkpoint.js";
 import { AgentContext, type ToolFact } from "./context.js";
 import { routeAfterReason, routeAtLoopStart } from "./routing.js";
@@ -91,16 +94,18 @@ interface RunMeta {
   promptVersions: string[];
 }
 
-/** 续跑时的现场：待执行的工具调用（可能没有）+ 已做出的审批决定 */
+/** 续跑时的现场：待执行的工具调用（可能没有）+ 已做出的审批决定 + 已收到的回答 */
 interface ResumeState {
   toolCalls?: ToolCall[];
   approvals: Record<string, boolean>;
+  answers: Record<string, AskAnswer>;
 }
 
-/** act 的两种结局：要么跑完了一批，要么撞上需要审批的调用 */
+/** act 的三种结局：跑完了一批、撞上需要审批的调用、撞上需要用户回答的调用 */
 type ActOutcome =
   | { kind: "ran"; resultById: Map<string, ToolResult> }
-  | { kind: "needs-approval"; call: ToolCall };
+  | { kind: "needs-approval"; call: ToolCall }
+  | { kind: "needs-answer"; call: ToolCall };
 
 /**
  * 一次工具调用的审批裁决：
@@ -112,6 +117,32 @@ type ApprovalDecision = "allow" | "ask-human" | "ask-ai";
 
 /** 用户拒绝执行时回灌给模型的内容：必须说清「是被人拒了」，而不是「工具坏了」 */
 const APPROVAL_DENIED = "用户拒绝执行该工具调用，请换一种方式或直接说明无法完成";
+
+/**
+ * 用户跳过提问时回灌给模型的内容。
+ *
+ * 那句「不要重复追问」不能省：否则模型常常把同一个问题再问一遍，
+ * 而用户刚刚明确表示不想回答——于是变成一次反复打扰。
+ */
+const QUESTION_SKIPPED =
+  "用户选择跳过这个问题。不要重复追问同一问题，按你已有的判断继续，或说明这一项无法确定。";
+
+/** 把用户回答整理成工具结果：跳过与作答是两种截然不同的形状，模型一眼能区分 */
+function askResult(answer: AskAnswer): Record<string, unknown> {
+  if (answer.skipped) return { skipped: true, note: QUESTION_SKIPPED };
+  return { answers: answer.answers };
+}
+
+/**
+ * ToolCall → 存档里的「待决调用」。
+ * 待批与待问在存档里是同一个形状（PendingApproval / PendingQuestion），因此共用一个转换。
+ */
+function toPendingCall(
+  call: ToolCall | undefined,
+): { callId: string; tool: string; arguments: Record<string, unknown> } | undefined {
+  if (!call) return undefined;
+  return { callId: call.id, tool: call.name, arguments: call.arguments };
+}
 
 export class Agent {
   private readonly runtime: ToolRuntime;
@@ -275,6 +306,7 @@ export class Agent {
       toolCalls:
         last?.role === "assistant" && last.toolCalls?.length ? last.toolCalls : undefined,
       approvals: checkpoint.approvals ?? {},
+      answers: checkpoint.answers ?? {},
     };
 
     const meta: RunMeta = {
@@ -286,7 +318,7 @@ export class Agent {
     const start = performance.now();
     logger.info(
       `续跑运行 ${runId}：从第 ${context.iterations} 轮之后继续` +
-        (pending.toolCalls ? `（接着执行 ${pending.toolCalls.length} 个待批工具）` : ""),
+        (pending.toolCalls ? `（接着处理 ${pending.toolCalls.length} 个待决工具）` : ""),
     );
     await this.bus.publish(
       makeEvent(
@@ -374,6 +406,7 @@ export class Agent {
     // 恢复时可能已经有一批工具调用在等执行：挂起前 LLM 已经把它们给出来了
     let awaiting: ToolCall[] | undefined = resume?.toolCalls;
     const approvals: Record<string, boolean> = { ...resume?.approvals };
+    const answers: Record<string, AskAnswer> = { ...resume?.answers };
 
     for (;;) {
       const control = routeAtLoopStart({
@@ -398,17 +431,33 @@ export class Agent {
         awaiting = response.toolCalls;
       }
 
-      const outcome = await this.act(awaiting, ctx, approvals, meta.input);
+      const outcome = await this.act(awaiting, ctx, approvals, answers, meta.input);
       if (outcome.kind === "needs-approval") {
         // 挂起：把现场、状态与待批调用一起落盘，外部给出决定后再续跑。
         // 这一步优先于下面的取消判断：待批现场是攒出来的，不能因为此刻收到取消就丢掉
         await this.saveCheckpoint(messages, ctx, meta, {
           approvals,
-          pending: outcome.call,
+          answers,
+          pendingApproval: outcome.call,
           state,
         });
         throw new ApprovalRequiredError(
           `工具 ${outcome.call.name} 需要人工审批后才会执行`,
+          ctx.runId,
+          outcome.call,
+        );
+      }
+      if (outcome.kind === "needs-answer") {
+        // 同上，只是等的是「回答」而不是「批准」。现场照常落盘：用户可能过一会儿才答，
+        // 期间进程重启也得能把这次提问原样取回来。
+        await this.saveCheckpoint(messages, ctx, meta, {
+          approvals,
+          answers,
+          pendingQuestion: outcome.call,
+          state,
+        });
+        throw new QuestionRequiredError(
+          `工具 ${outcome.call.name} 需要用户回答后才会继续`,
           ctx.runId,
           outcome.call,
         );
@@ -425,7 +474,7 @@ export class Agent {
       // 先记步数再存档：存档里的 iterations 表示「已完成的步数」，恢复时直接沿用
       ctx.iterations++;
       // 存档必须在「消息序列完整」时写：assistant 的 tool_calls 与随后的 tool 结果都齐了
-      await this.saveCheckpoint(messages, ctx, meta, { approvals, state });
+      await this.saveCheckpoint(messages, ctx, meta, { approvals, answers, state });
 
       awaiting = undefined;
     }
@@ -591,11 +640,16 @@ export class Agent {
    *
    * 自动 AI 审批档不同：AI 就地裁决、**不挂起**。因此它不写 checkpoint，
    * 也不抛 ApprovalRequiredError；拒绝时把理由作为工具结果回灌，让模型知道可以换路。
+   *
+   * `ask_user` 是第三类：它既不需要审批（不执行外部动作），也不能真的被执行
+   * （「执行」它等于没有人的回答）。没回答就挂起等回答，有回答就**用回答构造结果**，
+   * 因此它永远不进 `toRun`。
    */
   private async act(
     calls: ToolCall[],
     ctx: AgentContext,
     approvals: Record<string, boolean>,
+    answers: Record<string, AskAnswer>,
     question: string,
   ): Promise<ActOutcome> {
     // AI 拒绝的调用：callId → 理由。与人工拒绝统一按「不执行」处理，但轨迹里能区分
@@ -630,10 +684,40 @@ export class Agent {
     );
     if (undecided) return { kind: "needs-approval", call: undecided };
 
+    // 待问的调用：参数先校验，不合格的当普通错误回灌——否则会挂起一张没有选项的空卡片，
+    // 用户点不动、运行也回不来。同一批里若有两个待问的，先挂起第一个，第二个下一轮再说。
+    const askErrors = new Map<string, string>();
+    let pendingAsk: { call: ToolCall; questions: AskQuestion[] } | undefined;
+    for (const call of calls) {
+      if (call.name !== ASK_USER_TOOL_NAME || answers[call.id] !== undefined) continue;
+      let questions: AskQuestion[];
+      try {
+        questions = parseAskQuestions(call.arguments);
+      } catch (error) {
+        askErrors.set(call.id, error instanceof Error ? error.message : String(error));
+        continue;
+      }
+      if (!pendingAsk) pendingAsk = { call, questions };
+    }
+    if (pendingAsk) {
+      await this.bus.publish(
+        makeEvent(
+          EventType.QuestionAsked,
+          { call_id: pendingAsk.call.id, questions: pendingAsk.questions },
+          ctx.runId,
+        ),
+      );
+      return { kind: "needs-answer", call: pendingAsk.call };
+    }
+
     // 被拒的调用不执行，直接把「被拒绝」作为工具结果回灌——模型据此改走别的路子
     const denied = calls.filter((call) => approvals[call.id] === false);
+    // ask_user 一律不交给运行时：有回答的由下面的 answers 分支构造结果，没回答的上面已返回
     const toRun = calls.filter(
-      (call) => approvals[call.id] !== false && !aiDenied.has(call.id),
+      (call) =>
+        approvals[call.id] !== false &&
+        !aiDenied.has(call.id) &&
+        call.name !== ASK_USER_TOOL_NAME,
     );
     const batch = await this.runtime.executeBatch(toRun, ctx.runId, this.bus, ctx.signal);
 
@@ -643,6 +727,28 @@ export class Agent {
     }
     for (const [callId, reason] of aiDenied) {
       resultById.set(callId, { ok: false, error: `${APPROVAL_DENIED}（AI 审批：${reason}）` });
+    }
+    for (const [callId, reason] of askErrors) {
+      resultById.set(callId, { ok: false, error: reason });
+    }
+    // 用户的回答直接成为工具结果。走这里而不是走运行时，因此轨迹里不会有 tool_start/tool_end——
+    // 它确实没有「被执行」，而是「被回答」，这一点从事件名上一眼可辨。
+    for (const call of calls) {
+      if (call.name !== ASK_USER_TOOL_NAME) continue;
+      const answer = answers[call.id];
+      if (!answer) continue;
+      await this.bus.publish(
+        makeEvent(
+          EventType.QuestionAnswered,
+          {
+            call_id: call.id,
+            answers: answer.answers,
+            skipped: answer.skipped === true,
+          },
+          ctx.runId,
+        ),
+      );
+      resultById.set(call.id, { ok: true, data: askResult(answer) });
     }
     return { kind: "ran", resultById };
   }
@@ -707,13 +813,18 @@ export class Agent {
   /**
    * 裁决一条工具调用由谁放行。判定顺序（先宽后严，白名单优先于一切）：
    *  1. 档位 = 完全访问           → 直接放行（即使工具在审批名单里）
-   *  2. 白名单命中 (tool, 参数)   → 直接放行（人工放行过，连 AI 都不调用）
-   *  3. 审批名单不含该工具         → 直接放行（本来就不是敏感工具）
-   *  4. 已有人工决定               → 放行（true 走执行、false 在上层按拒绝处理）
-   *  5. 手动审批档                 → 挂起等人工
-   *  6. 否则（自动 AI 审批档）     → 交 AI 裁决
+   *  2. 工具 = ask_user           → 直接放行（它不执行动作，见下）
+   *  3. 白名单命中 (tool, 参数)   → 直接放行（人工放行过，连 AI 都不调用）
+   *  4. 审批名单不含该工具         → 直接放行（本来就不是敏感工具）
+   *  5. 已有人工决定               → 放行（true 走执行、false 在上层按拒绝处理）
+   *  6. 手动审批档                 → 挂起等人工
+   *  7. 否则（自动 AI 审批档）     → 交 AI 裁决
    *
-   * 第 4 步不写进设计文档的顺序，但 act() 必须认它：续跑时挂起的那次调用已被决定过，
+   * 第 2 步放在名单判断**之前**是刻意的：ask_user 的结果只能来自人的回答，
+   * 「批准它」是一句没有意义的话。若有人把它误写进 MINIAGENT_APPROVAL_TOOLS，
+   * 让它变成「等批准」会是一个没人看得懂的挂起——所以这里无条件把它排除在审批之外。
+   *
+   * 第 5 步不写进设计文档的顺序，但 act() 必须认它：续跑时挂起的那次调用已被决定过，
    * 不能再问第二遍。判定所需的信息都在内存里，全程同步——这正是白名单要常驻内存的原因。
    */
   private decideApproval(
@@ -721,6 +832,7 @@ export class Agent {
     approvals: Record<string, boolean>,
   ): ApprovalDecision {
     if (this.permissionMode === "full") return "allow";
+    if (call.name === ASK_USER_TOOL_NAME) return "allow";
     if (this.allowlist?.has(call.name, call.arguments)) return "allow";
     if (!this.settings.approvalTools.includes(call.name)) return "allow";
     if (approvals[call.id] !== undefined) return "allow";
@@ -733,7 +845,13 @@ export class Agent {
     ctx: AgentContext,
     meta: RunMeta,
     // 参数刻意不叫 state：函数体里的 state 专指 RunState，两个名字混用容易读错
-    control: { approvals: Record<string, boolean>; pending?: ToolCall; state: RunState },
+    control: {
+      approvals: Record<string, boolean>;
+      answers: Record<string, AskAnswer>;
+      pendingApproval?: ToolCall;
+      pendingQuestion?: ToolCall;
+      state: RunState;
+    },
   ): Promise<void> {
     if (!this.settings.checkpointEnabled) return;
     try {
@@ -753,13 +871,11 @@ export class Agent {
         // 显式状态一并入档：续跑时不必再从工具列表反推计划与失败计数
         state: control.state,
         approvals: control.approvals,
-        pendingApproval: control.pending
-          ? {
-              callId: control.pending.id,
-              tool: control.pending.name,
-              arguments: control.pending.arguments,
-            }
-          : undefined,
+        // 回答与审批决定同样每次入档（不只在挂起时写）：一批里可能先答一个、再挂起问第二个
+        answers: control.answers,
+        // 这里不传就是 undefined，JSON 序列化后该字段消失——正常续跑点因此不会残留「待决」标记
+        pendingApproval: toPendingCall(control.pendingApproval),
+        pendingQuestion: toPendingCall(control.pendingQuestion),
       });
     } catch (error) {
       // 存档失败不该让正在跑的对话失败

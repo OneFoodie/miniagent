@@ -28,7 +28,7 @@ const principles: PromptSegment = {
 
 const toolPolicy: PromptSegment = {
   id: "tool_policy",
-  version: "1.9.0",
+  version: "1.10.0",
   render: (context) => {
     const lines = [
       "## 工具使用规则",
@@ -63,6 +63,16 @@ const toolPolicy: PromptSegment = {
         "- 跑通一套以后还会重复用的多步做法后（或用户说「记下来 / 以后照这个来」），" +
           "用 create_skill 把它固化成技能；写完当轮即可用 load_skill 读回核对。",
         "- 技能只写指引、不写代码；技能目录会跨会话长期生效，别把一次性的临时步骤写进去。",
+      );
+    }
+    if (context.toolNames.includes("ask_user")) {
+      lines.push(
+        "- 只有用户才知道、且工具查不到的信息（偏好、目标、优先级、取舍）用 ask_user 问，" +
+          "不要替用户假设一个再往下做。",
+        "- ask_user 必须给 2-6 个候选选项，把最推荐的放第一个，用 description 说明选了会怎样。" +
+          "一次最多 4 个问题，只问真正卡住下一步的。",
+        "- 「回答完这件事就结束」的问题不要用 ask_user——那种情况直接在回答里问即可，" +
+          "挂起等一次点击反而更慢。",
       );
     }
     if (context.toolNames.includes("shell")) {

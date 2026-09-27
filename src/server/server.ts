@@ -23,7 +23,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Agent } from "../agent/agent.js";
 import { AiApprover } from "../agent/aiApprover.js";
 import { ApprovalAllowlist } from "../agent/allowlist.js";
-import { listCheckpoints, loadCheckpoint, recordApproval } from "../agent/checkpoint.js";
+import { listCheckpoints, loadCheckpoint, recordAnswer, recordApproval } from "../agent/checkpoint.js";
+import type { AskAnswer, AskAnswerItem } from "../agent/checkpoint.js";
 import { AgentContext } from "../agent/context.js";
 import { loadSettings, type Settings } from "../core/config.js";
 import {
@@ -34,7 +35,11 @@ import {
   toEnvText,
 } from "../core/configSchema.js";
 import { updateEnvFile } from "../core/envFile.js";
-import { ApprovalRequiredError, MiniAgentError } from "../core/errors.js";
+import {
+  ApprovalRequiredError,
+  MiniAgentError,
+  QuestionRequiredError,
+} from "../core/errors.js";
 import { EventBus, EventType, makeEvent } from "../core/events.js";
 import { getLogger, setupLogging } from "../core/logging.js";
 import {
@@ -75,6 +80,7 @@ import {
 import { Tracer } from "../observability/tracer.js";
 import { registerSkillTools, SkillRegistry } from "../skills/index.js";
 import { registerBuiltins, reapplyTools } from "../tools/builtins/index.js";
+import { MAX_OPTIONS, MAX_QUESTIONS } from "../tools/builtins/askUser.js";
 import { describeShell } from "../tools/builtins/shell/index.js";
 import {
   childRegistryOf,
@@ -202,6 +208,37 @@ async function readJsonBody(request: IncomingMessage): Promise<ChatRequest> {
 function writeJson(response: ServerResponse, status: number, payload: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(payload));
+}
+
+/**
+ * 校验 `POST /api/answer` 的作答形状，不合法返回 undefined。
+ *
+ * **只做形状校验**，不校验 `selected` 里的值是否真在模型给的候选里：用户可能自己填「其他」，
+ * 模型也可能中途改主意，而且这本来就不是安全边界（回答只是交给模型的输入，
+ * 它不能改档位、不能放行命令）。数量上限复用工具自己的常量，避免两处各写一个数字。
+ */
+function parseAskAnswer(input: { answers?: unknown; skipped?: unknown }): AskAnswer | undefined {
+  // 跳过时允许不带 answers：用户什么都没选
+  if (input.skipped === true) return { answers: [], skipped: true };
+
+  if (!Array.isArray(input.answers)) return undefined;
+  if (input.answers.length === 0 || input.answers.length > MAX_QUESTIONS) return undefined;
+
+  const items: AskAnswerItem[] = [];
+  for (const raw of input.answers) {
+    if (raw === null || typeof raw !== "object") return undefined;
+    const item = raw as { question?: unknown; selected?: unknown; other?: unknown };
+    if (typeof item.question !== "string") return undefined;
+    if (!Array.isArray(item.selected) || item.selected.length > MAX_OPTIONS) return undefined;
+    if (item.selected.some((value) => typeof value !== "string")) return undefined;
+    const other = typeof item.other === "string" ? item.other.trim() : "";
+    items.push({
+      question: item.question,
+      selected: [...(item.selected as string[])],
+      ...(other ? { other } : {}),
+    });
+  }
+  return { answers: items };
 }
 
 /** 以 SSE 格式写一条事件（连接已关闭时安全跳过） */
@@ -660,6 +697,15 @@ async function handleChat(
         arguments: error.call.arguments,
         session_id: sessionId,
       });
+    } else if (error instanceof QuestionRequiredError) {
+      // 挂起等回答：同样不是失败。参数已由 Agent 校验过，这里直接回带
+      writeSSE(response, "question_required", {
+        run_id: error.runId,
+        call_id: error.call.id,
+        tool: error.call.name,
+        questions: (error.call.arguments as { questions?: unknown }).questions ?? [],
+        session_id: sessionId,
+      });
     } else {
       const message = error instanceof Error ? error.message : String(error);
       writeSSE(response, "error", {
@@ -965,6 +1011,46 @@ export function createRequestHandler(deps: ServerDeps) {
             remembered = true;
           }
           writeJson(response, 200, { ok: true, call, remembered });
+        })
+        .catch((error: unknown) => {
+          writeJson(response, 400, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      return;
+    }
+    // 用户对 ask_user 的回答：与审批一样拆成「落回答 → 客户端再发 /api/chat {resume_run_id}」，
+    // 拆开是为了让回答先落盘——两步之间进程重启也不丢。
+    //
+    // **不校验管理令牌**：回答只是把用户的话交给模型，不放大任何权限（不能改档位、不能放行命令），
+    // 与 /api/chat 的续跑同级。审批必须校验，因为「批准」等于放行本机执行。
+    if (request.method === "POST" && urlPath === "/api/answer") {
+      void readRawBody(request)
+        .then(async (raw) => {
+          const parsed = JSON.parse(raw) as {
+            run_id?: unknown;
+            answers?: unknown;
+            skipped?: unknown;
+          };
+          if (typeof parsed.run_id !== "string" || !SAFE_ID.test(parsed.run_id)) {
+            writeJson(response, 400, {
+              ok: false,
+              error: "需要 run_id（仅字母数字下划线连字符）",
+            });
+            return;
+          }
+          const answer = parseAskAnswer(parsed);
+          if (!answer) {
+            writeJson(response, 400, { ok: false, error: "answers 形状不合法" });
+            return;
+          }
+          const question = await recordAnswer(settings.checkpointDir, parsed.run_id, answer);
+          if (!question) {
+            writeJson(response, 404, { ok: false, error: "该运行没有待回答的提问" });
+            return;
+          }
+          writeJson(response, 200, { ok: true, question });
         })
         .catch((error: unknown) => {
           writeJson(response, 400, {

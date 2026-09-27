@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ApprovalAllowlist } from "../src/agent/allowlist.js";
-import { saveCheckpoint } from "../src/agent/checkpoint.js";
+import { saveCheckpoint, loadCheckpoint } from "../src/agent/checkpoint.js";
 import { loadSettings, type Settings } from "../src/core/config.js";
 import { SessionStore } from "../src/history/store.js";
 import type { KnowledgeBase } from "../src/knowledge/index.js";
@@ -22,6 +22,7 @@ import { Metrics } from "../src/observability/metrics.js";
 import { createOtelExporter } from "../src/observability/otel.js";
 import { createRequestHandler, type ServerDeps } from "../src/server/server.js";
 import { SkillRegistry } from "../src/skills/index.js";
+import { ASK_USER_TOOL_NAME, askUser } from "../src/tools/builtins/askUser.js";
 import { calculator } from "../src/tools/builtins/calculator.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { FakeLLM, finalResponse, toolCallResponse, type LLMCall } from "./fakes.js";
@@ -902,5 +903,129 @@ describe("POST /api/chat 的权限档位", () => {
     // 工具照常执行、正常收尾
     expect(events.map((item) => item.event)).toContain("tool_end");
     expect(events.at(-1)!.event).toBe("done");
+  });
+});
+
+describe("用户提问接口（ask_user）", () => {
+  const QUESTIONS = [
+    {
+      question: "目标平台是哪个？",
+      options: [{ label: "Linux" }, { label: "Windows" }],
+    },
+  ];
+
+  function postAnswer(body: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/api/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** 造一份挂在 ask_user 上的待答存档 */
+  async function pendingQuestion(runId: string): Promise<void> {
+    await saveCheckpoint(deps.settings.checkpointDir, {
+      runId,
+      input: "原始问题",
+      createdAt: 1,
+      updatedAt: 1,
+      iterations: 0,
+      usage: { promptTokens: 0, completionTokens: 0 },
+      messages: [{ role: "system", content: "系统" }],
+      promptVersions: [],
+      approvals: {},
+      pendingQuestion: {
+        callId: "q1",
+        tool: ASK_USER_TOOL_NAME,
+        arguments: { questions: QUESTIONS },
+      },
+    });
+  }
+
+  it("模型调用 ask_user 时挂起，并推 question_required；不报错", async () => {
+    deps.registry.register(askUser);
+    deps.llm = new FakeLLM([
+      toolCallResponse([["q1", ASK_USER_TOOL_NAME, { questions: QUESTIONS }]]),
+    ]);
+
+    const events = await collectSse(await postChat({ message: "帮我做点什么" }));
+
+    const asked = events.find((item) => item.event === "question_required");
+    expect(asked?.data).toMatchObject({
+      call_id: "q1",
+      tool: ASK_USER_TOOL_NAME,
+      questions: QUESTIONS,
+    });
+    // 挂起不是失败：不该有 error 事件
+    expect(events.some((item) => item.event === "error")).toBe(false);
+    expect(events.at(-1)!.event).toBe("done");
+  });
+
+  it("提交回答：200 并回带整条提问；不需要管理令牌", async () => {
+    // 与 /api/chat 的续跑同级——回答只是把用户的话交给模型，不放大任何权限
+    await pendingQuestion("run_q1");
+
+    const response = await postAnswer({
+      run_id: "run_q1",
+      answers: [{ question: "目标平台是哪个？", selected: ["Linux"], other: " 还要兼容 ARM  " }],
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      question: { callId: string; tool: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.question).toMatchObject({ callId: "q1", tool: ASK_USER_TOOL_NAME });
+
+    // 回答落盘了（决定与续跑是两次请求，中间进程可能重启）
+    const saved = await loadCheckpoint(deps.settings.checkpointDir, "run_q1");
+    expect(saved?.answers?.q1?.answers[0]).toEqual({
+      question: "目标平台是哪个？",
+      selected: ["Linux"],
+      other: "还要兼容 ARM",
+    });
+  });
+
+  it("跳过：不带 answers 也能提交，落盘为 skipped", async () => {
+    await pendingQuestion("run_skip");
+
+    const response = await postAnswer({ run_id: "run_skip", skipped: true });
+    expect(response.status).toBe(200);
+
+    const saved = await loadCheckpoint(deps.settings.checkpointDir, "run_skip");
+    expect(saved?.answers?.q1?.skipped).toBe(true);
+  });
+
+  it("没有待回答项 404；run_id 非法或 answers 形状不对 400", async () => {
+    // 形状合法的回答 + 不存在的运行 → 404（形状校验在查存档之前，所以下面几种都是 400）
+    const valid = [{ question: "问", selected: ["A"] }];
+    expect((await postAnswer({ run_id: "no_such_run", answers: valid })).status).toBe(404);
+    expect((await postAnswer({ run_id: "../etc", answers: valid })).status).toBe(400);
+    // answers 为空数组、缺 answers、selected 不是字符串数组
+    expect((await postAnswer({ run_id: "run_q1", answers: [] })).status).toBe(400);
+    expect((await postAnswer({ run_id: "run_q1" })).status).toBe(400);
+    expect(
+      (
+        await postAnswer({
+          run_id: "run_q1",
+          answers: [{ question: "问", selected: [1, 2] }],
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it("一次超过 4 个问题被挡在 400（上限与工具 schema 共用同一组常量）", async () => {
+    expect(
+      (
+        await postAnswer({
+          run_id: "run_q1",
+          answers: Array.from({ length: 5 }, (_, index) => ({
+            question: `第 ${index} 问`,
+            selected: ["A"],
+          })),
+        })
+      ).status,
+    ).toBe(400);
   });
 });
