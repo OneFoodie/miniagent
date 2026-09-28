@@ -68,6 +68,14 @@ export interface AgentOptions {
   /** 长期记忆：按当前问题召回相关历史片段 */
   longTerm?: LongTermMemory;
   /**
+   * 本次运行所属的会话 id。
+   *
+   * 长期记忆落在**一个全局共用**的文件里，若不限定范围，召回会把别的会话的历史带进本轮
+   * ——现象就是「每个会话都带进了所有会话的历史」。给出会话 id 后召回只在该会话内进行。
+   * 不传（CLI / 评测等没有会话概念的场景）则退回旧行为：不按会话过滤。
+   */
+  sessionId?: string;
+  /**
    * 上一轮实际执行过的工具（运行期写入，非模型输出）。
    * 由调用方从会话历史里取出传进来——它会被渲染进系统提示词的证据小节，
    * 用来回答「我上一轮到底做过什么」这个问题。
@@ -150,6 +158,7 @@ export class Agent {
   private readonly skills?: SkillRegistry;
   private readonly memory?: SummaryMemory;
   private readonly longTerm?: LongTermMemory;
+  private readonly sessionId?: string;
   private readonly executionLedger?: ToolFact[];
   private readonly permissionMode: PermissionMode;
   private readonly aiApprover?: ToolApprover;
@@ -181,6 +190,7 @@ export class Agent {
     this.skills = options.skills;
     this.memory = options.memory;
     this.longTerm = options.longTerm;
+    this.sessionId = options.sessionId;
     this.executionLedger = options.executionLedger;
   }
 
@@ -362,7 +372,8 @@ export class Agent {
   private async recall(query: string, ctx: AgentContext): Promise<string[]> {
     if (!this.longTerm) return [];
     try {
-      const records = await this.longTerm.search(query, 3);
+      // 限定在本会话内召回：长期记忆是全局共用的，不限定就会把别的会话的历史带进本轮
+      const records = await this.longTerm.search(query, 3, { sessionId: this.sessionId });
       // 召回明细进轨迹：lifecycle 后端会带上 kind / score / confidence / memoryId，
       // 便于在"查看原始轨迹"里核对某轮到底召回了什么、为什么排在这个位置
       await this.bus.publish(

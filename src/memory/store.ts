@@ -11,7 +11,12 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import type { LongTermMemory, MemoryRecord } from "./base.js";
+import type {
+  LongTermMemory,
+  MemoryRecord,
+  MemorySearchOptions,
+} from "./base.js";
+import { matchesSession } from "./base.js";
 
 export class JsonlLongTermMemory implements LongTermMemory {
   constructor(private readonly filePath: string) {}
@@ -26,12 +31,18 @@ export class JsonlLongTermMemory implements LongTermMemory {
     return all.slice(-limit);
   }
 
-  async search(query: string, limit = 5): Promise<MemoryRecord[]> {
+  async search(
+    query: string,
+    limit = 5,
+    options?: MemorySearchOptions,
+  ): Promise<MemoryRecord[]> {
     const terms = tokenize(query);
     if (terms.length === 0) return [];
 
     const now = Date.now() / 1000;
     return (await this.readAll())
+      // 先按会话收窄再排序：过滤掉别的会话的记录，它们不该参与本次召回的竞争
+      .filter((record) => matchesSession(record.meta, options))
       .map((record) => ({ record, score: score(record, terms, now) }))
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score)

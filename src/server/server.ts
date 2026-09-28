@@ -616,6 +616,8 @@ async function handleChat(
     skills: deps.skills,
     memory,
     longTerm: deps.longTerm,
+    // 长期记忆是全局共用文件，召回必须限定在本会话内，否则会把别的会话的历史带进本轮
+    sessionId,
     // 上一轮真的执行过什么，进系统提示词的证据小节（见 lastTurnToolFacts）
     executionLedger: lastTurnToolFacts(priorTurns),
     // 本次请求的权限档位与配套的审批器/白名单：续跑走同一个 agent，档位同样生效

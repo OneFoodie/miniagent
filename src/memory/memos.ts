@@ -20,6 +20,7 @@ import type {
   ConversationAwareMemory,
   ConversationTurn,
   MemoryRecord,
+  MemorySearchOptions,
 } from "./base.js";
 
 const logger = getLogger("miniagent.memos");
@@ -95,7 +96,16 @@ export class MemOsMemory implements ConversationAwareMemory {
     }
   }
 
-  async search(query: string, limit = 5): Promise<MemoryRecord[]> {
+  /**
+   * 召回。`options.sessionId` **在这里无法生效**：MemOS 云 API 的检索只有 `user_id`
+   * 这一个维度，没有按会话过滤的参数，返回结果里也不带会话标识。要真正按会话隔离，
+   * 用本地后端（jsonl / lifecycle）。
+   */
+  async search(
+    query: string,
+    limit = 5,
+    _options?: MemorySearchOptions,
+  ): Promise<MemoryRecord[]> {
     if (!query.trim()) return [];
     const result = await this.post("/search/memory", {
       query,

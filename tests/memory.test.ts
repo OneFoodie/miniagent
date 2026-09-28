@@ -137,4 +137,17 @@ describe("JsonlLongTermMemory 长期记忆", () => {
     for (let i = 0; i < 5; i++) await store.add({ text: `记录 ${i}`, ts: now });
     expect(await store.load(2)).toHaveLength(2);
   });
+
+  it("按会话隔离召回：只返回本会话写入的记录", async () => {
+    const store = await makeStore();
+    const now = Date.now() / 1000;
+    await store.add({ text: "问：代号是 ZTX-9917", ts: now, meta: { sessionId: "a" } });
+    await store.add({ text: "问：代号是 ZTX-9917", ts: now, meta: { sessionId: "b" } });
+
+    const hits = await store.search("代号", 5, { sessionId: "a" });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.meta?.sessionId).toBe("a");
+    // 不传 sessionId（CLI / 评测）时保持旧行为：不过滤
+    expect(await store.search("代号", 5)).toHaveLength(2);
+  });
 });

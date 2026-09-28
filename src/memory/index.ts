@@ -15,10 +15,12 @@ export type {
   ConversationTurn,
   LongTermMemory,
   MemoryRecord,
+  MemorySearchOptions,
 } from "./base.js";
 export {
   estimateTokens,
   isConversationMemory,
+  matchesSession,
   messagesTokens,
   rememberTurn,
 } from "./base.js";

@@ -12,13 +12,47 @@ export interface MemoryRecord {
   meta?: Record<string, unknown>;
 }
 
+/**
+ * 检索范围。长期记忆是**跨会话共用一个文件**的，但会话之间必须互相看不见，
+ * 因此检索时要能限定在「本次会话自己写入的那些记录」上——范围由调用方（Agent）给出。
+ */
+export interface MemorySearchOptions {
+  /**
+   * 会话 id。给了就只召回该会话写入的记忆；省略则不按会话过滤
+   * （CLI / 评测这类没有会话概念的场景靠这个默认值保持原行为）。
+   */
+  sessionId?: string;
+}
+
+/**
+ * 一条记录的 meta 是否落在检索范围内。
+ *
+ * 判定刻意是**严格相等**而不是「没有 sessionId 就算公共记忆」：后者会让早期写入的
+ * 无会话记录渗进每一个会话，正是要消除的那种串台。
+ */
+export function matchesSession(
+  meta: Record<string, unknown> | undefined,
+  options?: MemorySearchOptions,
+): boolean {
+  const sessionId = options?.sessionId;
+  if (!sessionId) return true;
+  return meta?.sessionId === sessionId;
+}
+
 /** 可插拔的长期记忆后端。
  * v1 提供 JSONL 文件实现；将来换向量库只需要实现同一接口，调用方无需改动。
  */
 export interface LongTermMemory {
   add(record: MemoryRecord): Promise<void>;
-  /** 按关键词相关性（含时间衰减）检索 */
-  search(query: string, limit?: number): Promise<MemoryRecord[]>;
+  /**
+   * 按关键词相关性（含时间衰减）检索。
+   * `options.sessionId` 用于把召回限制在本会话内，实现会话独立。
+   */
+  search(
+    query: string,
+    limit?: number,
+    options?: MemorySearchOptions,
+  ): Promise<MemoryRecord[]>;
   /** 取最近的若干条 */
   load(limit?: number): Promise<MemoryRecord[]>;
 }

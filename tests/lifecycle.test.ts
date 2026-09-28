@@ -207,6 +207,26 @@ describe("LifecycleMemory", () => {
     expect(confidenceOf(all[0]!)).toBeCloseTo(0.7, 3);
   });
 
+  it("按会话隔离召回：只返回本会话写入的记忆", async () => {
+    const memory = await makeMemory();
+    await memory.add({ text: "用户对量子计算感兴趣", ts: NOW, meta: { sessionId: "a" } });
+    await memory.add({ text: "用户对量子计算感兴趣", ts: NOW, meta: { sessionId: "b" } });
+
+    const hits = await memory.search("量子计算", 5, { sessionId: "a" });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.meta?.sessionId).toBe("a");
+    // 去重也按会话隔离：两个会话说同一句话，各写各的，不会互相吸收
+    expect(await memory.load()).toHaveLength(2);
+  });
+
+  it("未指定会话时保持旧行为：不按会话过滤", async () => {
+    const memory = await makeMemory();
+    await memory.add({ text: "用户对量子计算感兴趣", ts: NOW, meta: { sessionId: "a" } });
+    await memory.add({ text: "用户对量子计算感兴趣", ts: NOW, meta: { sessionId: "b" } });
+
+    expect(await memory.search("量子计算", 5)).toHaveLength(2);
+  });
+
   it("矛盾消解：新说法取代旧说法，旧记忆不再被召回", async () => {
     const memory = await makeMemory();
     await memory.add({ text: "用户喜欢咖啡", ts: NOW });

@@ -26,7 +26,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { getLogger } from "../core/logging.js";
-import type { LongTermMemory, MemoryRecord } from "./base.js";
+import type {
+  LongTermMemory,
+  MemoryRecord,
+  MemorySearchOptions,
+} from "./base.js";
+import { matchesSession } from "./base.js";
 import {
   clamp01,
   composeScore,
@@ -119,8 +124,11 @@ export class LifecycleMemory implements LongTermMemory {
     const conflicting = hasContradictionCue(text);
 
     const tokens = tokenize(text);
+    // 会话范围：写入侧和检索侧用同一把尺子。不这样做的话，会话 A 说过的「同一句话」会把
+    // 会话 B 的新记忆当成重复吸收进 A 的记录——B 从此再也检索不到自己那条（已被过滤掉）。
+    const scope = sessionScope(record.meta);
     // findMostSimilar 用的是"加入新记忆之前"的集合，因此不会匹配到自己
-    const nearest = this.findMostSimilar(tokens);
+    const nearest = this.findMostSimilar(tokens, scope);
 
     // 先弄清与最近那条之间是"换个说法"还是"内容被换掉了"
     const change = nearest ? compareFacts(tokens, this.tokensOf(nearest.memory)) : undefined;
@@ -177,10 +185,14 @@ export class LifecycleMemory implements LongTermMemory {
     this.tokensById.set(memory.id, tokens);
     this.invalidateIndex();
     await this.persist();
-    await this.consolidateIfNeeded();
+    await this.consolidateIfNeeded(scope);
   }
 
-  async search(query: string, limit = 5): Promise<MemoryRecord[]> {
+  async search(
+    query: string,
+    limit = 5,
+    options?: MemorySearchOptions,
+  ): Promise<MemoryRecord[]> {
     await this.ensureLoaded();
 
     const tokens = tokenize(query);
@@ -191,6 +203,8 @@ export class LifecycleMemory implements LongTermMemory {
     const queryVector = index.vector(tokens);
 
     const ranked = this.active()
+      // 记忆库是全局共用的，会话隔离只能靠这里：只让本会话写入的记录参与排序
+      .filter((memory) => matchesSession(memory.meta, options))
       .map((memory) => {
         const semantic = TfidfIndex.cosine(
           queryVector,
@@ -271,12 +285,15 @@ export class LifecycleMemory implements LongTermMemory {
    * 选谁是按"不含语义信号"的价值排序——巩固发生在写入路径上，此刻没有查询语境，
    * 于是 semantic 记 0，仅用时效 / 置信度 / 优先级三项加权（越小越该被吸收）。
    * 压缩失败或模型返回空 → 本次放弃，原记录原样保留。
+   *
+   * 巩固同样按会话隔离：否则会把别的会话的记忆吸收进本会话的归档，而归档又被那些会话
+   * 检索过滤掉，等于替它们删了记忆。归档记录沿用同一 sessionId，才对本会话仍可检索。
    */
-  private async consolidateIfNeeded(): Promise<void> {
+  private async consolidateIfNeeded(scope?: MemorySearchOptions): Promise<void> {
     const options = this.consolidate;
     if (!options) return;
 
-    const active = this.active();
+    const active = this.active().filter((memory) => matchesSession(memory.meta, scope));
     if (active.length <= options.threshold) return;
 
     const now = Date.now() / 1000;
@@ -314,7 +331,11 @@ export class LifecycleMemory implements LongTermMemory {
         createdAt: now,
         lastAccessedAt: now,
         accessCount: 0,
-        meta: { consolidatedFrom: picked.length },
+        // 沿用本次写入的会话范围：归档只对本会话可见，不跟着变成"全局记忆"
+        meta: {
+          ...(scope?.sessionId ? { sessionId: scope.sessionId } : {}),
+          consolidatedFrom: picked.length,
+        },
       };
       for (const item of picked) item.memory.consolidatedInto = archive.id;
 
@@ -346,9 +367,12 @@ export class LifecycleMemory implements LongTermMemory {
 
   private findMostSimilar(
     tokens: string[],
+    scope?: MemorySearchOptions,
   ): { memory: StoredMemory; overlap: number } | undefined {
     let best: { memory: StoredMemory; overlap: number } | undefined;
     for (const memory of this.active()) {
+      // 只在同一会话内做相似判定：跨会话「像」不该触发去重，更不该触发矛盾消解
+      if (!matchesSession(memory.meta, scope)) continue;
       const overlap = overlapCoefficient(tokens, this.tokensOf(memory));
       if (!best || overlap > best.overlap) best = { memory, overlap };
     }
@@ -426,6 +450,17 @@ function readPriority(record: MemoryRecord): number | undefined {
 function readConfidence(record: MemoryRecord): number | undefined {
   const value = record.meta?.confidence;
   return typeof value === "number" && Number.isFinite(value) ? clamp01(value) : undefined;
+}
+
+/**
+ * 从记录的 meta 里取出会话范围。
+ * 没有 sessionId 时返回 undefined —— 那是 CLI / 评测这类没有会话概念的场景，不过滤。
+ */
+function sessionScope(
+  meta: Record<string, unknown> | undefined,
+): MemorySearchOptions | undefined {
+  const sessionId = meta?.sessionId;
+  return typeof sessionId === "string" && sessionId ? { sessionId } : undefined;
 }
 
 /**
