@@ -771,21 +771,36 @@ function currentPermissionMode() {
   return sessionStorage.getItem(PERMISSION_KEY) ?? "manual";
 }
 
-/** 刷新下拉外观：完全访问用警示色；无令牌时锁在手动审批 */
+/** 档位的中文短名，用于拼提示语。取自下拉本身，免得同一批文案在 HTML 与 JS 里各写一份 */
+function permissionLabel(mode) {
+  const option = [...permissionMode.options].find((item) => item.value === mode);
+  return option?.textContent ?? mode;
+}
+
+/**
+ * 刷新下拉外观：完全访问用警示色；无令牌时**真的退回**手动审批。
+ *
+ * 「无令牌就退回手动审批」不能只做在界面上（把其它选项置灰）——下拉里存的可能是
+ * 上次有令牌时选的档位，只置灰的话它仍显示「完全访问」，请求也仍带着
+ * `permission_mode=full`，服务端 401「缺少 X-Admin-Token 请求头」，整个对话当场断掉。
+ * 所以这里必须同时把 sessionStorage 改回 manual，让「界面显示什么」与「请求发什么」一致。
+ */
 function renderPermissionPicker() {
-  const mode = currentPermissionMode();
+  const canEscalate = adminToken() !== "";
+  const mode = canEscalate ? currentPermissionMode() : "manual";
+  if (!canEscalate) sessionStorage.setItem(PERMISSION_KEY, "manual");
+
   permissionMode.value = mode;
   permPicker.classList.toggle("danger", mode === "full");
   permissionHint.textContent = PERMISSION_TEXT[mode] ?? "";
 
-  const canEscalate = adminToken() !== "";
   for (const option of permissionMode.options) {
     option.disabled = option.value !== "manual" && !canEscalate;
   }
   permissionMode.disabled = false;
   if (!canEscalate) {
     permissionHint.textContent =
-      "只有「手动审批」可用：切换到其它档位需要在配置菜单里填入管理令牌";
+      "只有「手动审批」可用：切换到其它档位需要先在配置菜单里填入管理令牌";
   }
 }
 
@@ -1726,7 +1741,16 @@ async function streamChat(message, card, resumeRunId = null) {
 
   if (!response.ok || !response.body) {
     const data = await response.json().catch(() => ({}));
-    throw new Error(data.error ?? `HTTP ${response.status}`);
+    const detail = data.error ?? `HTTP ${response.status}`;
+    // 401 只可能来自「档位不是手动审批、而浏览器里没有管理令牌」。光说「缺少 X-Admin-Token
+    // 请求头」用户不知道去哪儿处理，所以把下一步直接写出来。
+    if (response.status === 401) {
+      throw new Error(
+        `${detail}（当前档位是「${permissionLabel(currentPermissionMode())}」，` +
+          `请在左下角配置里填入管理令牌，或把档位调回「手动审批」）`,
+      );
+    }
+    throw new Error(detail);
   }
 
   const reader = response.body.getReader();
