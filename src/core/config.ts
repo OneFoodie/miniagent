@@ -197,8 +197,9 @@ export interface Settings {
   memosTimeout: number;
 
   /**
-   * 配置菜单的管理令牌。留空则 /api/config 一律 403（即关闭配置接口）。
+   * 配置菜单的管理令牌，默认 666666（6 位数字，便于口头传达）。
    * 单独一个令牌而不是复用 API Key：它能改 shellMode，等于本机执行权。
+   * 注意：默认值形同公开，公网部署务必在 .env 里改成只有自己知道的值。
    */
   adminToken: string;
   /**
@@ -437,7 +438,7 @@ export function loadSettings(): Settings {
     memosUserId: readString("MINIAGENT_MEMOS_USER_ID", "miniagent-local"),
     memosTimeout: readNumber("MINIAGENT_MEMOS_TIMEOUT", 15),
 
-    adminToken: readString("MINIAGENT_ADMIN_TOKEN", ""),
+    adminToken: readString("MINIAGENT_ADMIN_TOKEN", "666666"),
     envFile: readString("MINIAGENT_ENV_FILE", "./.env"),
   };
 

@@ -830,8 +830,9 @@ async function toggleTrace(btn, panel, runId) {
  * 下拉始终可见，所以不存在隐藏状态；按会话分开反而会出现「同一个标签页里切了会话、
  * 档位却悄悄变了」这种更难察觉的情况。
  *
- * 非默认档需要管理令牌（服务端校验）：不这样做的话，公网实例上任何访客
+ * 三档统一使用同一个 X-Admin-Token（服务端校验）：不这样做的话，公网实例上任何访客
  * 都能一键给自己开「完全访问」，那这个下拉就成了提权按钮而不是安全控制。
+ * 统一令牌让前后端逻辑更简单——不需要区分"哪档要令牌哪档不要"。
  */
 const PERMISSION_KEY = "miniagent.permissionMode";
 
@@ -845,89 +846,67 @@ function currentPermissionMode() {
   return sessionStorage.getItem(PERMISSION_KEY) ?? "manual";
 }
 
-/** 档位的中文短名，用于拼提示语。取自下拉本身，免得同一批文案在 HTML 与 JS 里各写一份 */
-function permissionLabel(mode) {
-  const option = [...permissionMode.options].find((item) => item.value === mode);
-  return option?.textContent ?? mode;
-}
-
 /**
- * 刷新下拉外观：完全访问用警示色；无令牌时**真的退回**手动审批。
+ * 刷新下拉外观：完全访问用警示色；无令牌时**真的退回**手动审批作为 UI 默认。
  *
- * 「无令牌就退回手动审批」不能只做在界面上（把其它选项置灰）——下拉里存的可能是
- * 上次有令牌时选的档位，只置灰的话它仍显示「完全访问」，请求也仍带着
- * `permission_mode=full`，服务端 401「缺少 X-Admin-Token 请求头」，整个对话当场断掉。
- * 所以这里必须同时把 sessionStorage 改回 manual，让「界面显示什么」与「请求发什么」一致。
+ * 三档统一需要 X-Admin-Token，没 token 什么档都发不出去。但 UI 仍显示 manual
+ * 作为最保守默认，而不是把用户锁在空白态——他填完 token 后再切档位即可。
+ * sessionStorage 也同步改回 manual，避免界面与请求体出现错位。
  */
 function renderPermissionPicker() {
-  const canEscalate = adminToken() !== "";
-  const mode = canEscalate ? currentPermissionMode() : "manual";
-  if (!canEscalate) sessionStorage.setItem(PERMISSION_KEY, "manual");
+  const hasToken = adminToken() !== "";
+  const mode = hasToken ? currentPermissionMode() : "manual";
+  if (!hasToken && currentPermissionMode() !== "manual") {
+    sessionStorage.setItem(PERMISSION_KEY, "manual");
+  }
 
   permissionMode.value = mode;
   permPicker.classList.toggle("danger", mode === "full");
-  permissionHint.textContent = PERMISSION_TEXT[mode] ?? "";
-
-  for (const option of permissionMode.options) {
-    option.disabled = option.value !== "manual" && !canEscalate;
-  }
+  // 不再因为没 token 而禁用选项：用户可以选任何档，请求时没 token 自然 401 引导去填
   permissionMode.disabled = false;
-  if (!canEscalate) {
-    permissionHint.textContent =
-      "只有「手动审批」可用：切换到其它档位需要先在配置菜单里填入管理令牌";
-  }
+  permissionHint.textContent = hasToken
+    ? (PERMISSION_TEXT[mode] ?? "")
+    : "所有档位都需要管理令牌：请在配置菜单里填入 X-Admin-Token 才能发送请求";
 }
 
 /**
  * 切换档位。
  *
- * 非默认档要同时把执行通道切到 full —— 否则选了档位也跑不动（shellMode=off 时
- * 工具根本没注册）。这是有副作用的：配置菜单里的 shellMode 会被这里覆盖，
- * 所以**只在真的发生变化时提示**（用 PUT 返回的 applied 判断），不静默改。
+ * 三档都要求 shell=full 才能跑，所以任何档位变化（包括切回 manual）都可能需要
+ * 把执行通道切到 full —— shellMode=off 时工具根本没注册。
+ * PUT /api/config 本身也要 X-Admin-Token，没 token 时会 401，正常处理即可。
  */
 async function changePermissionMode(next) {
-  const escalated = next !== "manual";
-  if (escalated && adminToken() === "") {
-    sessionStorage.setItem(PERMISSION_KEY, "manual");
-    renderPermissionPicker();
-    return;
-  }
-
-  if (escalated) {
-    permissionHint.textContent = "正在切换…";
-    try {
-      const response = await configRequest({
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ values: { shellMode: "full" } }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        // 令牌不对就退回手动审批，并把原因摆出来，不要留一个「看起来切了其实没切」的下拉
-        sessionStorage.setItem(PERMISSION_KEY, "manual");
-        renderPermissionPicker();
-        permissionHint.textContent =
-          (data.errors ?? []).map((item) => item.message).join("；") ||
-          data.error ||
-          `HTTP ${response.status}`;
-        return;
-      }
-      sessionStorage.setItem(PERMISSION_KEY, next);
-      renderPermissionPicker();
-      if ((data.applied ?? []).includes("shellMode")) {
-        permissionHint.textContent = `${PERMISSION_TEXT[next]}（已同时把执行通道切到 full）`;
-      }
-      return;
-    } catch (error) {
+  // 三档都要 shell=full 才能跑，任何档位变化都先确保执行通道开到位。
+  // PUT /api/config 本身也要 X-Admin-Token，没 token 时会 401，正常处理即可。
+  permissionHint.textContent = "正在切换…";
+  try {
+    const response = await configRequest({
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values: { shellMode: "full" } }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      // 令牌不对就退回手动审批，并把原因摆出来，不要留一个「看起来切了其实没切」的下拉
       sessionStorage.setItem(PERMISSION_KEY, "manual");
       renderPermissionPicker();
-      permissionHint.textContent = `切换失败：${error.message}`;
+      permissionHint.textContent =
+        (data.errors ?? []).map((item) => item.message).join("；") ||
+        data.error ||
+        `HTTP ${response.status}`;
       return;
     }
+    sessionStorage.setItem(PERMISSION_KEY, next);
+    renderPermissionPicker();
+    if ((data.applied ?? []).includes("shellMode")) {
+      permissionHint.textContent = `${PERMISSION_TEXT[next]}（已同时把执行通道切到 full）`;
+    }
+  } catch (error) {
+    sessionStorage.setItem(PERMISSION_KEY, "manual");
+    renderPermissionPicker();
+    permissionHint.textContent = `切换失败：${error.message}`;
   }
-
-  sessionStorage.setItem(PERMISSION_KEY, next);
-  renderPermissionPicker();
 }
 
 permissionMode.addEventListener("change", () => {
@@ -1253,7 +1232,7 @@ function renderConfigAuthError(status, serverMessage) {
     how.className = "config-hint";
     how.style.marginLeft = "0";
     how.textContent =
-      "在服务器部署目录的 .env 里加一行 MINIAGENT_ADMIN_TOKEN=<足够长的随机串>，" +
+      "在服务器部署目录的 .env 里加一行 MINIAGENT_ADMIN_TOKEN=<你的管理令牌>，" +
       "重启服务（systemctl restart miniagent）后点下面的按钮。";
     configPanel.appendChild(how);
 
@@ -1800,7 +1779,10 @@ async function runTurn(message, card) {
 async function streamChat(message, card, resumeRunId = null) {
   const response = await fetch("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Token": adminToken(),
+    },
     body: JSON.stringify({
       message,
       history: chatHistory,
@@ -1816,12 +1798,12 @@ async function streamChat(message, card, resumeRunId = null) {
   if (!response.ok || !response.body) {
     const data = await response.json().catch(() => ({}));
     const detail = data.error ?? `HTTP ${response.status}`;
-    // 401 只可能来自「档位不是手动审批、而浏览器里没有管理令牌」。光说「缺少 X-Admin-Token
-    // 请求头」用户不知道去哪儿处理，所以把下一步直接写出来。
+    // 401 只可能来自「浏览器里没有管理令牌或填得不对」。
+    // 三档统一用同一个 X-Admin-Token，不再有"调回手动审批就能用"的退路。
     if (response.status === 401) {
       throw new Error(
-        `${detail}（当前档位是「${permissionLabel(currentPermissionMode())}」，` +
-          `请在左下角配置里填入管理令牌，或把档位调回「手动审批」）`,
+        `${detail}（所有档位统一使用同一个管理令牌，` +
+          `请在左下角配置里填入 X-Admin-Token）`,
       );
     }
     throw new Error(detail);

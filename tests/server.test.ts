@@ -96,10 +96,15 @@ function rawRequest(path: string): Promise<string> {
   });
 }
 
-function postChat(body: unknown): Promise<Response> {
+const TEST_TOKEN = "test-admin-token";
+
+function postChat(body: unknown, token: string = TEST_TOKEN): Promise<Response> {
   return fetch(`${baseUrl}/api/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Token": token,
+    },
     body: JSON.stringify(body),
   });
 }
@@ -845,9 +850,9 @@ describe("POST /api/chat 的权限档位", () => {
     });
   }
 
-  it("manual（或缺省）不需要令牌，run_started 回带档位", async () => {
+  it("三档统一需要令牌；manual 或缺省档带令牌能正常返回，run_started 回带档位", async () => {
     deps.llm = new FakeLLM([finalResponse("好的")]);
-    const response = await postChatWithMode({ message: "你好" });
+    const response = await postChatWithMode({ message: "你好" }, TOKEN);
     expect(response.status).toBe(200);
 
     const events = await collectSse(response);
@@ -855,29 +860,49 @@ describe("POST /api/chat 的权限档位", () => {
     expect(started.permission_mode).toBe("manual");
   });
 
-  it("非 manual 档缺令牌 401、错令牌 401、对令牌 200 并回带档位", async () => {
+  it("三档统一：缺令牌 401、错令牌 401、对令牌 200 并回带档位", async () => {
     deps.llm = new FakeLLM([finalResponse("好的")]);
 
+    // 三档缺令牌都 401
+    expect((await postChatWithMode({ message: "hi" })).status).toBe(401);
+    expect((await postChatWithMode({ message: "hi", permission_mode: "manual" })).status).toBe(401);
+    expect((await postChatWithMode({ message: "hi", permission_mode: "ai" })).status).toBe(401);
     expect((await postChatWithMode({ message: "hi", permission_mode: "full" })).status).toBe(401);
+
+    // 错令牌也都 401
+    expect((await postChatWithMode({ message: "hi" }, "wrong")).status).toBe(401);
     expect(
       (await postChatWithMode({ message: "hi", permission_mode: "ai" }, "wrong")).status,
     ).toBe(401);
 
-    const ok = await postChatWithMode({ message: "hi", permission_mode: "full" }, TOKEN);
-    expect(ok.status).toBe(200);
-    const events = await collectSse(ok);
-    expect((events[0]!.data as { permission_mode: string }).permission_mode).toBe("full");
+    // 对令牌三档都能过
+    const okManual = await postChatWithMode({ message: "hi" }, TOKEN);
+    expect(okManual.status).toBe(200);
+    const eventsManual = await collectSse(okManual);
+    expect((eventsManual[0]!.data as { permission_mode: string }).permission_mode).toBe("manual");
+
+    const okFull = await postChatWithMode({ message: "hi", permission_mode: "full" }, TOKEN);
+    expect(okFull.status).toBe(200);
+    const eventsFull = await collectSse(okFull);
+    expect((eventsFull[0]!.data as { permission_mode: string }).permission_mode).toBe("full");
   });
 
-  it("未配置令牌时非 manual 档也 403（堵住公网提权）", async () => {
+  it("未配置令牌时三档都 403（堵住公网提权）", async () => {
     deps.settings.adminToken = "";
+    expect((await postChatWithMode({ message: "hi" }, TOKEN)).status).toBe(403);
     expect(
       (await postChatWithMode({ message: "hi", permission_mode: "ai" }, TOKEN)).status,
     ).toBe(403);
+    expect(
+      (await postChatWithMode({ message: "hi", permission_mode: "full" }, TOKEN)).status,
+    ).toBe(403);
   });
 
-  it("非法档位值返回 400 并列出候选", async () => {
-    const response = await postChatWithMode({ message: "hi", permission_mode: "ait" });
+  it("非法档位值返回 400 并列出候选（需带合法令牌才能过鉴权）", async () => {
+    const response = await postChatWithMode(
+      { message: "hi", permission_mode: "ait" },
+      TOKEN,
+    );
     expect(response.status).toBe(400);
     const body = (await response.json()) as { error: string };
     expect(body.error).toContain("manual");

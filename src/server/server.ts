@@ -487,14 +487,12 @@ async function handleChat(
     });
     return;
   }
-  // 非默认档会放大权限（full 直接执行、ai 让 AI 放行），必须过管理令牌；
-  // manual 更保守、不放大任何权限，因此不需要令牌，公网访客也只能停在这一档。
-  if (permissionMode !== "manual") {
-    const auth = checkAdminAuth(request, settings);
-    if (!auth.ok) {
-      writeJson(response, auth.status, { error: auth.error });
-      return;
-    }
+  // 三档统一过管理令牌。手动审批虽不放大权限，但同一令牌让前后端逻辑更简单——
+  // 不需要区分"哪档要令牌哪档不要"，所有 /api/chat 请求都带同一个 X-Admin-Token。
+  const auth = checkAdminAuth(request, settings);
+  if (!auth.ok) {
+    writeJson(response, auth.status, { error: auth.error });
+    return;
   }
 
   response.writeHead(200, {

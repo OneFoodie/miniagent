@@ -59,10 +59,10 @@ decideApproval(call)
 ## 3. 作用域与鉴权
 
 - 档位**按会话**，存在 `sessionStorage`（与刚修好的会话隔离同一套键空间）。
-- 每次 `POST /api/chat` 带 `permission_mode`；**服务端在非默认档时校验 `X-Admin-Token`**，
-  缺失或不对则 403。默认档（手动审批）不需要令牌——它更保守，不构成提权。
-- **未配令牌时下拉锁定在「手动审批」**，并在下拉下方给出说明。
-  公网访客因此无法给自己提权；配了令牌的你在浏览器里切一下即可。
+- 每次 `POST /api/chat` 带 `permission_mode` 与 `X-Admin-Token`；**三档统一校验令牌**，
+  缺失或不对则 401/403。统一令牌让前后端逻辑更简单——不需要区分"哪档要令牌哪档不要"。
+- 未配令牌时，任何档位的 `/api/chat` 请求都会 403。前端下拉仍显示手动审批作为最保守 UI 默认，
+  但发送会失败并引导用户去配置菜单填令牌。
 - 服务端**无状态**：不新增持久化，不需要新的 GET 接口。刷新页面由 `sessionStorage` 恢复。
 
 ## 4. 三处必须说清的代价
@@ -130,7 +130,7 @@ export class AiApprover {
 | `src/agent/aiApprover.ts` | **新建**：`AiApprover.judge()` |
 | `src/agent/agent.ts` | `decideApproval(call)` 三态；`act()` 三条路；extra 接受 `permissionMode` 与 `aiApprover` |
 | `src/core/events.ts` | 加 `ApprovalAiVerdict` 事件 |
-| `src/server/server.ts` | `/api/chat` 解析并校验 `permission_mode`（非 manual 要令牌）；把 `aiApprover` 与档位传给 Agent；`run_started` 回带生效档位 |
+| `src/server/server.ts` | `/api/chat` 解析 `permission_mode` 并**三档统一校验** `X-Admin-Token`；把 `aiApprover` 与档位传给 Agent；`run_started` 回带生效档位 |
 | `src/tools/builtins/subagent.ts` | 子 agent 沿用父 run 的档位（子 agent 的工具调用同样受管辖） |
 | `public/index.html` | `.dock-hint` 一行改为「权限档位下拉 + 提示文字」 |
 | `public/app.js` | 档位状态（sessionStorage）+ 下拉渲染 + 令牌门禁 + 切换时写回 `shellMode` + 监听 AI 裁决事件渲染成一步 |
@@ -156,14 +156,11 @@ export class AiApprover {
 | `AiApprover` 输出不可解析 | 返回非 JSON → `deny`，理由含「不可解析」 |
 | `AiApprover` LLM 抛错 | `judge()` 不抛，返回 `deny`，理由含失败原因 |
 | 事件 | AI 裁决后轨迹里有 `approval_ai_verdict`，含 verdict 与 reason |
-| 接口鉴权 | `permission_mode=manual` 无令牌 → 200；`=full`/`=ai` 无令牌 → 403；错令牌 → 401；对令牌 → 200 |
+| 接口鉴权 | 三档统一无令牌 → 401；错令牌 → 401；对令牌 → 200；未配置令牌时三档都 403 |
 | 非法档位值 | `/api/chat` 收到未知档位 → 400 |
 
 ## 8. 非目标
 
-- **不改 `/api/chat` 的整体鉴权**：本次只让「非默认档位」需要令牌。默认档（手动审批）不带令牌也能用，
-  因为它不放大任何权限。**线上仍应保持 `shellMode=off`**：即使有审批与 AI 裁决，
-  让陌生人在你机器上触发命令本身就不必要。
 - **不改文件工具的沙箱**：`read_file` / `write_file` 始终锁在 `workspace` 内。
   放开它并不增加能力（`shell` 本来就能读任意路径），只是去掉唯一的约束。
 - **不做第四档**：`readonly` 不进下拉，它继续作为配置菜单里的独立预设。
