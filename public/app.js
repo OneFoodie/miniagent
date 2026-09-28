@@ -167,6 +167,25 @@ async function submit() {
 
 /* ---------------- 消息元素构造 ---------------- */
 
+/**
+ * 翻页用的图标按钮（提问卡片在题与题之间切换）。
+ * 放模块级是因为它不依赖卡片闭包里的任何东西——纯 DOM 构造。
+ */
+function makeNavButton(label, direction) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "question-nav-btn";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.innerHTML = `
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+      <path d="${direction === "up" ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6"}"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  `;
+  return button;
+}
+
 function appendUserBubble(container, text) {
   const bubble = document.createElement("div");
   bubble.className = "msg-user";
@@ -438,26 +457,51 @@ function createAssistantCard(container, userMessage) {
      * 渲染提问卡片并把「等用户选完」表达成一个 Promise（与 askApproval 同一套路）。
      *
      * 返回 resolve(答案) / resolve(null)（用户点了跳过）。
-     * 单选/多选由模型给的 multiple 决定；每题都带一个「其他」输入框——选项是模型的猜测，
-     * 猜不中时用户得能直接写。单选下选了选项就清空「其他」，避免「既选了 A 又写了 B」这种自相矛盾的答案。
+     *
+     * **一屏只显示一道题**：多道题时顶部是「上一题 / 2 / 3 / 下一题」，切题只是就地重建卡片内容，
+     * 不再另开一张卡——一次问答应当始终是时间线上的一个节点。把几道题同时铺开是行不通的：
+     * 实测 3 题 × 5 个带说明的选项有 1268px，一屏装不下，用户既看不全题干也不知道还剩几题。
+     *
+     * 推进规则：
+     *  - 单选题点中某个选项即视为这题答完，自动进入下一题（延迟一下让选中态能被看见）；
+     *  - 多选、以及「其他」自由输入**不自动前进**——多选没法判断「选完了」，「其他」更是还在打字；
+     *  - 最后一题答完不自动提交，只把「提交」点亮交给用户点，否则他就没机会改用「其他」；
+     *  - 「下一题」在本题作答前不可点：这就是「结束一题才能进入下一题」。
      */
     askQuestion(info) {
       this.finish();
       questionEl = document.createElement("div");
       questionEl.className = "question-card";
 
-      const title = document.createElement("p");
-      title.className = "question-title";
-      title.textContent = "需要你确认";
-      questionEl.appendChild(title);
-
       const questions = Array.isArray(info.questions) ? info.questions : [];
-      // 每题一份作答状态：选中的标签集合 + 那个「其他」输入框
+      // 每题的作答状态：选中的标签集合 + 「其他」里的文字。
+      // 「其他」存字符串而不是存 DOM 引用：切题会把输入框整块重建，引用一重建就失效。
       const state = questions.map((item) => ({
         multiple: item.multiple === true,
         selected: new Set(),
-        otherInput: null,
+        other: "",
       }));
+      let index = 0;
+
+      const head = document.createElement("div");
+      head.className = "question-head";
+      const title = document.createElement("p");
+      title.className = "question-title";
+      title.textContent = "需要你确认";
+
+      const nav = document.createElement("div");
+      nav.className = "question-nav";
+      const prevBtn = makeNavButton("上一题", "up");
+      const counter = document.createElement("span");
+      counter.className = "question-counter";
+      const nextBtn = makeNavButton("下一题", "down");
+      nav.append(prevBtn, counter, nextBtn);
+      head.append(title, nav);
+      // 只有一道题时没有可切换的对象，整块藏起来，别留两个点不动的箭头
+      nav.hidden = questions.length < 2;
+
+      const body = document.createElement("div");
+      body.className = "question-body";
 
       const status = document.createElement("span");
       status.className = "approval-status";
@@ -465,124 +509,154 @@ function createAssistantCard(container, userMessage) {
       submit.type = "button";
       submit.className = "approval-btn primary";
       submit.textContent = "提交";
-      // 每题都要有答案（选了选项或填了「其他」）才让提交；跳过始终可点
-      const refreshSubmit = () => {
-        submit.disabled = !questions.every(
-          (_, index) =>
-            state[index].selected.size > 0 ||
-            (state[index].otherInput?.value.trim() ?? "") !== "",
-        );
+      const skip = document.createElement("button");
+      skip.type = "button";
+      skip.className = "approval-btn";
+      skip.textContent = "跳过";
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+      actions.append(submit, skip, status);
+
+      questionEl.append(head, body, actions);
+      card.appendChild(questionEl);
+
+      /** 本题是否已作答：选了选项，或填了「其他」 */
+      const answered = (at) => state[at].selected.size > 0 || state[at].other.trim() !== "";
+
+      /** 题号与三个按钮的可用性：切题、作答之后都要重算 */
+      const refresh = () => {
+        counter.textContent = `${index + 1} / ${questions.length}`;
+        prevBtn.disabled = index === 0;
+        nextBtn.disabled = index === questions.length - 1 || !answered(index);
+        // 「每题都要有答案」这条老规矩不变；配合上面的前进闸门，答完最后一题时它自然点亮
+        submit.disabled = !questions.every((_, at) => answered(at));
       };
 
-      questions.forEach((item, index) => {
-        const block = document.createElement("div");
-        block.className = "question-block";
+      /** 把当前这一题铺进 body：换题时整块重建，控件类型与「其他」的值都跟着换 */
+      const render = () => {
+        const item = questions[index];
+        if (!item) return;
+        const current = state[index];
+        body.textContent = "";
 
         const text = document.createElement("p");
         text.className = "question-text";
         text.textContent = item.question;
         const tag = document.createElement("span");
         tag.className = "question-tag";
-        tag.textContent = state[index].multiple ? "可多选" : "单选";
+        tag.textContent = current.multiple ? "可多选" : "单选";
         text.appendChild(tag);
-        block.appendChild(text);
+        body.appendChild(text);
 
         const optionList = document.createElement("div");
         optionList.className = "question-options";
-        // 同组同名：单选靠它互斥，不需要自己维护 radio 的勾选状态
+        // 同组同名：单选靠它互斥，不需要自己维护勾选状态
         const groupName = `q_${info.call_id}_${index}`;
+        // 先建出来，选项的 change 里要用它清空「其他」
+        const otherInput = document.createElement("input");
+        otherInput.type = "text";
+        otherInput.placeholder = "选项都不合适时自己写";
+        otherInput.value = current.other;
+
         for (const option of item.options ?? []) {
           const row = document.createElement("label");
           row.className = "question-option";
           const box = document.createElement("input");
-          box.type = state[index].multiple ? "checkbox" : "radio";
+          box.type = current.multiple ? "checkbox" : "radio";
           box.name = groupName;
           box.value = option.label;
+          box.checked = current.selected.has(option.label);
 
-          const body = document.createElement("span");
-          body.className = "question-option-body";
+          const optionBody = document.createElement("span");
+          optionBody.className = "question-option-body";
           const label = document.createElement("span");
           label.className = "question-option-label";
           label.textContent = option.label;
-          body.appendChild(label);
+          optionBody.appendChild(label);
           if (option.description) {
             const desc = document.createElement("span");
             desc.className = "question-option-desc";
             desc.textContent = option.description;
-            body.appendChild(desc);
+            optionBody.appendChild(desc);
           }
 
           box.addEventListener("change", () => {
-            const current = state[index];
             if (current.multiple) {
               if (box.checked) current.selected.add(option.label);
               else current.selected.delete(option.label);
-            } else {
-              current.selected.clear();
-              current.selected.add(option.label);
-              if (current.otherInput) current.otherInput.value = "";
+              refresh();
+              return;
             }
-            refreshSubmit();
+            // 单选：选中即视为这题答完；顺手清掉「其他」，避免「既选了 A 又写了 B」
+            current.selected.clear();
+            current.selected.add(option.label);
+            current.other = "";
+            otherInput.value = "";
+            refresh();
+            // 自动进下一题（最后一题不动，等用户点提交）。
+            // 记住出发时的题号：这 0.2 秒里用户可能自己点了「下一题」，那就以他的操作为准。
+            const from = index;
+            if (from < questions.length - 1) {
+              setTimeout(() => {
+                if (index === from) go(from + 1);
+              }, 220);
+            }
           });
 
-          row.append(box, body);
+          row.append(box, optionBody);
           optionList.appendChild(row);
         }
-        block.appendChild(optionList);
+        body.appendChild(optionList);
 
         const otherRow = document.createElement("label");
         otherRow.className = "question-other";
         const otherText = document.createElement("span");
         otherText.textContent = "其他";
-        const otherInput = document.createElement("input");
-        otherInput.type = "text";
-        otherInput.placeholder = "选项都不合适时自己写";
         otherInput.addEventListener("input", () => {
+          current.other = otherInput.value;
           // 单选下写了「其他」就取消同组的选择；多选下两者可以并存（既要 A 又要补充说明）
-          if (!state[index].multiple && otherInput.value.trim()) {
-            state[index].selected.clear();
+          if (!current.multiple && otherInput.value.trim()) {
+            current.selected.clear();
             for (const box of optionList.querySelectorAll("input")) box.checked = false;
           }
-          refreshSubmit();
+          // 刻意不自动前进：用户还在打字
+          refresh();
         });
-        state[index].otherInput = otherInput;
         otherRow.append(otherText, otherInput);
-        block.appendChild(otherRow);
+        body.appendChild(otherRow);
 
-        questionEl.appendChild(block);
-      });
+        refresh();
+        scrollCardIntoView(questionEl);
+      };
 
-      const actions = document.createElement("div");
-      actions.className = "approval-actions";
-      const skip = document.createElement("button");
-      skip.type = "button";
-      skip.className = "approval-btn";
-      skip.textContent = "跳过";
-      actions.append(submit, skip, status);
-      questionEl.appendChild(actions);
-      card.appendChild(questionEl);
-      scrollCardIntoView(questionEl);
-      refreshSubmit();
+      /** 切到指定题：越界与原地不动都直接忽略 */
+      const go = (target) => {
+        if (target < 0 || target >= questions.length || target === index) return;
+        index = target;
+        render();
+      };
+
+      prevBtn.addEventListener("click", () => go(index - 1));
+      nextBtn.addEventListener("click", () => go(index + 1));
+      render();
 
       return new Promise((resolve) => {
         const freeze = (message) => {
           submit.disabled = true;
           skip.disabled = true;
+          prevBtn.disabled = true;
+          nextBtn.disabled = true;
           for (const box of questionEl.querySelectorAll("input")) box.disabled = true;
           status.className = "approval-status";
           status.textContent = message;
         };
 
         submit.addEventListener("click", () => {
-          const answers = questions.map((item, index) => {
-            const current = state[index];
-            const other = current.otherInput?.value.trim() ?? "";
-            return {
-              question: item.question,
-              selected: [...current.selected],
-              ...(other ? { other } : {}),
-            };
-          });
+          const answers = questions.map((item, at) => ({
+            question: item.question,
+            selected: [...state[at].selected],
+            ...(state[at].other.trim() ? { other: state[at].other.trim() } : {}),
+          }));
           questionSummary = `你的回答：${answers
             .map((item) => [...item.selected, item.other].filter(Boolean).join("、"))
             .join("；")}`;

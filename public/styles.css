@@ -1153,18 +1153,59 @@ body::after {
   background: rgba(131, 192, 154, 0.05);
 }
 
+/* 卡片头部：左边标题，右边「上一题 / 2 / 3 / 下一题」。
+   只有一道题时切题按钮整块隐藏（见 app.js 的 render），这里只管排布 */
+.question-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
 .question-title {
-  margin: 0 0 10px;
+  margin: 0;
   font-family: var(--font-mono);
   font-size: 11.5px;
   letter-spacing: 0.6px;
   color: var(--sage);
 }
 
-.question-block + .question-block {
-  margin-top: 14px;
-  padding-top: 13px;
-  border-top: 1px solid var(--line);
+.question-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.question-counter {
+  min-width: 40px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.question-nav-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-soft);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.question-nav-btn:hover:not(:disabled) {
+  border-color: rgba(131, 192, 154, 0.5);
+  color: var(--ink);
+}
+
+/* 上一题（首题）与下一题（末题或本题未作答）都会置灰——前进闸门就长在这里 */
+.question-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .question-text {
