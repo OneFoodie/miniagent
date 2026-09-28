@@ -51,22 +51,22 @@ describe("摘要 prompt 保护精确措辞", () => {
 });
 
 describe("历史预算按模型窗口推导", () => {
-  it("默认按 128K 窗口 × 0.25 推导", () => {
+  it("默认按 128K 窗口 × 0.15 推导", () => {
     delete process.env.MINIAGENT_MODEL_CONTEXT_TOKENS;
     delete process.env.MINIAGENT_MEMORY_BUDGET_RATIO;
     delete process.env.MINIAGENT_MEMORY_MAX_TOKENS;
 
     const settings = loadSettings();
     expect(settings.modelContextTokens).toBe(131072);
-    expect(settings.memoryBudgetRatio).toBe(0.25);
-    expect(settings.memoryMaxTokens).toBe(Math.floor(131072 * 0.25));
+    expect(settings.memoryBudgetRatio).toBe(0.15);
+    expect(settings.memoryMaxTokens).toBe(Math.floor(131072 * 0.15));
   });
 
   it("换模型只改窗口，预算自动跟着变——不必再调预算", () => {
     process.env.MINIAGENT_MODEL_CONTEXT_TOKENS = "32768";
     try {
       const settings = loadSettings();
-      expect(settings.memoryMaxTokens).toBe(Math.floor(32768 * 0.25));
+      expect(settings.memoryMaxTokens).toBe(Math.floor(32768 * 0.15));
     } finally {
       delete process.env.MINIAGENT_MODEL_CONTEXT_TOKENS;
     }
@@ -78,6 +78,21 @@ describe("历史预算按模型窗口推导", () => {
       expect(loadSettings().memoryMaxTokens).toBe(5000);
     } finally {
       delete process.env.MINIAGENT_MEMORY_MAX_TOKENS;
+    }
+  });
+});
+
+describe("召回条数可配置", () => {
+  it("默认 3 条，可用 MINIAGENT_MEMORY_RECALL_LIMIT 覆盖", () => {
+    delete process.env.MINIAGENT_MEMORY_RECALL_LIMIT;
+    expect(loadSettings().memoryRecallLimit).toBe(3);
+
+    process.env.MINIAGENT_MEMORY_RECALL_LIMIT = "0";
+    try {
+      // 0 是合法值：本地后端据此不召回任何记忆
+      expect(loadSettings().memoryRecallLimit).toBe(0);
+    } finally {
+      delete process.env.MINIAGENT_MEMORY_RECALL_LIMIT;
     }
   });
 });

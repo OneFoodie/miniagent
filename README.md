@@ -63,7 +63,8 @@ npm start                     # → http://localhost:3000
 | `MINIAGENT_MAX_ITERATIONS` | `8` | 单轮最多迭代次数 |
 | `MINIAGENT_PLAN_MODE` | `true` | 计划模式：要求模型在多步任务上先给一句话计划，运行期记进状态并在「当前进度」里带上（不额外调用模型） |
 | `MINIAGENT_MODEL_CONTEXT_TOKENS` | `131072` | 模型上下文窗口；历史预算按它推导 |
-| `MINIAGENT_MEMORY_BUDGET_RATIO` | `0.25` | 历史预算占窗口的比例（换模型只需改上面那项） |
+| `MINIAGENT_MEMORY_BUDGET_RATIO` | `0.15` | 历史预算占窗口的比例（换模型只需改上面那项）。调大＝长对话少压缩、更贵 |
+| `MINIAGENT_MEMORY_RECALL_LIMIT` | `3` | 每轮召回多少条长期记忆注入提示词；条数即固定输入成本，`0` 表示不召回 |
 | `MINIAGENT_MEMORY_BACKEND` | 自动 | `jsonl` / `lifecycle` / `memos` |
 | `MINIAGENT_KNOWLEDGE_DIR` | `./knowledge` | 知识库目录，可配多个（逗号分隔） |
 | `MINIAGENT_KNOWLEDGE_BACKEND` | `lexical` | 检索引擎：`lexical`（词面）/ `vector`（语义）/ `hybrid`（两路 RRF 融合，需先跑 `model:fetch`） |
@@ -307,7 +308,7 @@ mermaid 是**按需**从 CDN 加载的（页面里真出现图表时才取一次
 |---|---|
 | **Reduce 压缩** | ① 历史：token 滑窗（预算 = 窗口 × 比例）+ 超阈值 LLM 摘要；摘要要求把用户提出的指令与约束**逐字引用**，不让压缩抹掉可执行性。② 循环内：工具结果整体超预算时，把**最早**的若干条折叠成占位符（本批结果永不折叠），只改正文不动结构，因此不破坏 `tool_calls` 配对 |
 | **Offload 卸载** | 工具结果超限时写入 `workspace/offload/<runId>/`，上下文里只留预览 + 路径，agent 可 `read_file` 取回；写盘失败才退化为截断。产物按 run 保留最近 50 个，更早的自动清理 |
-| **Retrieve 按需** | 长期记忆按问题召回 Top-3、知识库由模型自主调 `search_knowledge`、技能正文靠 `load_skill` 拉取 |
+| **Retrieve 按需** | 长期记忆在本会话内按问题召回（条数由 `MINIAGENT_MEMORY_RECALL_LIMIT` 控制，默认 Top-3）、知识库由模型自主调 `search_knowledge`、技能正文靠 `load_skill` 拉取 |
 | **Isolate 隔离** | `run_subagent` 把需要大量探索的子任务隔离出去，子 agent 有独立上下文与工具（递归深度为 1），父只拿结论与用量。**但它的中间步骤会中继到父轨迹**（`↳` 标记），隔离的是上下文而不是可观测性。子 agent 可选**角色**（researcher / analyst / critic，角色同时决定提示词与工具白名单，复核员拿不到写权限）；`run_subagents` 可**并行派发** 2-5 个互不依赖的子任务，一个失败不影响其他 |
 
 ### 执行事实随轮次持久化

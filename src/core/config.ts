@@ -56,6 +56,13 @@ export interface Settings {
    * 是成本考量，与模型窗口大小无关。
    */
   memorySummaryThreshold: number;
+  /**
+   * 每次运行召回多少条长期记忆注入系统提示词。
+   *
+   * 条数直接决定每轮的**固定输入成本**：召回内容随 system 消息一起重发，轮次越多付得越多。
+   * 设 0 即不召回（本地 jsonl / lifecycle 后端；MemOS 云 API 最少返回 1 条）。
+   */
+  memoryRecallLimit: number;
 
   /** 记忆巩固：可检索条数超过阈值时，把最低分的一批压缩成归档摘要 */
   memoryConsolidateThreshold: number;
@@ -271,11 +278,16 @@ const DEFAULT_EMBEDDING_MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2";
 
 /**
  * 历史消息预算占窗口的比例。
+ *
  * 不取满：context rot 的研究表明输入越长模型质量越差、成本也越高，
- * 所以留出大块余量给 system、工具回灌与输出。0.25（128K 下约 32K）在
- * 「长对话少触发摘要」与「不把窗口塞满」之间取平衡，可按需调整。
+ * 所以留出大块余量给 system、工具回灌与输出。
+ *
+ * 由 0.25 降到 0.15（128K 下 32K → 约 20K）是为了省 token——历史是单轮输入里最大的一块，
+ * 而且每轮都要重发。代价是长对话会更早触发摘要压缩（多花一次 LLM 调用）。
+ * 另外 `estimateTokens` 按「2 字符≈1 token」粗估，对中文是**低估**，真实占用比这个预算大，
+ * 取 0.15 也顺带把这部分误差留出了余量。要让长对话少压缩，把它调回 0.2~0.25。
  */
-const DEFAULT_MEMORY_BUDGET_RATIO = 0.25;
+const DEFAULT_MEMORY_BUDGET_RATIO = 0.15;
 
 /** 按 provider 名取预设；未知名字直接报错，避免带着空 baseUrl 跑到第一次请求才炸 */
 function resolvePreset(name: string): ProviderPreset {
@@ -360,6 +372,7 @@ export function loadSettings(): Settings {
         ? explicitMemoryBudget
         : Math.floor(modelContextTokens * memoryBudgetRatio),
     memorySummaryThreshold: readNumber("MINIAGENT_MEMORY_SUMMARY_THRESHOLD", 2000),
+    memoryRecallLimit: readNumber("MINIAGENT_MEMORY_RECALL_LIMIT", 3),
     memoryConsolidateThreshold: readNumber("MINIAGENT_MEMORY_CONSOLIDATE_THRESHOLD", 400),
     memoryConsolidateBatch: readNumber("MINIAGENT_MEMORY_CONSOLIDATE_BATCH", 40),
     memoryArchiveChars: readNumber("MINIAGENT_MEMORY_ARCHIVE_CHARS", 400),

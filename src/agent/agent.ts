@@ -372,8 +372,12 @@ export class Agent {
   private async recall(query: string, ctx: AgentContext): Promise<string[]> {
     if (!this.longTerm) return [];
     try {
-      // 限定在本会话内召回：长期记忆是全局共用的，不限定就会把别的会话的历史带进本轮
-      const records = await this.longTerm.search(query, 3, { sessionId: this.sessionId });
+      // 条数可配（MINIAGENT_MEMORY_RECALL_LIMIT）：召回内容每轮随 system 消息重发，
+      // 条数直接决定每轮的固定输入成本，所以不该写死在代码里。
+      // 同时限定在本会话内召回：长期记忆是全局共用的，不限定就会把别的会话的历史带进本轮。
+      const records = await this.longTerm.search(query, this.settings.memoryRecallLimit, {
+        sessionId: this.sessionId,
+      });
       // 召回明细进轨迹：lifecycle 后端会带上 kind / score / confidence / memoryId，
       // 便于在"查看原始轨迹"里核对某轮到底召回了什么、为什么排在这个位置
       await this.bus.publish(
